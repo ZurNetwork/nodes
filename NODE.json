@@ -1,6 +1,7 @@
 {
   "path": ".",
   "charted": "2026-09-12",
+  "short": "The NODE.json normalizer and lookup CLI",
   "is": "nodes — the NODE.json normalizer and lookup CLI: a small Rust program that formats, validates and queries a repository's per-directory NODE.json chart files (Zurfur is the first consumer).",
   "conventions": [
     "Rust edition 2024; dependencies are serde, serde_json and clap (derive) — nothing else unless it earns its place.",
