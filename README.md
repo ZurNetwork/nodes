@@ -25,7 +25,7 @@ Every `NODE.json` has exactly these fields, in this order; unknown keys are refu
 
 | Command | Does |
 |---|---|
-| `nodes tree` | the whole tree, indented: path + `is` |
+| `nodes tree` | the whole tree, drawn: each node's name + `is` |
 | `nodes ls` | every node, one line each |
 | `nodes chain <path>` | root → … → node: what to read to understand a path |
 | `nodes get <path> [field]` | one node, or one field of it |
@@ -38,6 +38,21 @@ Every `NODE.json` has exactly these fields, in this order; unknown keys are refu
 | `nodes touch <path> [--date YYYY-MM-DD]` | set `charted` to today |
 
 `--json` on any command emits JSON for machine consumers; a write command prints nothing in text mode and the updated node with `--json`. The repository root is the nearest ancestor of the current directory holding a `NODE.json` whose `path` is `.`; `--root <dir>` overrides.
+
+```
+$ nodes tree
+.  Zurfur — an AT Protocol-native art-commission platform: …
+├── backend  The Rust backend: a pure `domain` core, …
+│   └── crates  Twelve workspace crates arranged as a hexagon: …
+│       ├── adapter-atproto  The public data boundary: …
+│       └── api  The HTTP driving adapter over `composition::Runtime`: …
+│           └── src  Composition (lib/main) plus the cross-cutting HTTP concerns …
+└── contract  The API contract — protobuf as the independent IDL, …
+    └── zurfur  Pass-through namespace directory …
+        └── api/v1  The v1 corpus — package `zurfur.api.v1`, …
+```
+
+A node beneath a pass-through directory is named by its path from the parent node (`api/v1`). `--json` keeps full paths (`{path, is, children}`).
 
 ## Canonical form
 

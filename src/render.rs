@@ -46,20 +46,32 @@ pub fn ls_text(tree: &NodeTree) -> String {
     text
 }
 
-/// The tree from the root, two spaces of indent per level: `path  is`.
+/// The tree from the root, drawn with box connectors; each line names the node relative to its
+/// parent node (so a node two directories down reads `api/v1`) and states what it is.
 pub fn tree_text(tree: &NodeTree) -> String {
     let mut text = String::new();
-    if let Some(root) = tree.root() {
-        push_subtree(&mut text, tree, root, 0);
-    }
+    let Some(root) = tree.root() else {
+        return text;
+    };
+    let _ = writeln!(text, "{}  {}", root.location, root.node.is);
+    push_children(&mut text, tree, root, "");
     text
 }
 
-fn push_subtree(text: &mut String, tree: &NodeTree, node: &LoadedNode, depth: usize) {
-    let indent = "  ".repeat(depth);
-    let _ = writeln!(text, "{indent}{}  {}", node.location, node.node.is);
-    for child in tree.children(&node.location) {
-        push_subtree(text, tree, child, depth + 1);
+fn push_children(text: &mut String, tree: &NodeTree, parent: &LoadedNode, prefix: &str) {
+    let children = tree.children(&parent.location);
+    let count = children.len();
+    for (index, child) in children.into_iter().enumerate() {
+        let last = index + 1 == count;
+        let connector = if last { "└── " } else { "├── " };
+        let name = parent
+            .location
+            .relative(&child.location)
+            .unwrap_or(child.location.as_str());
+        let _ = writeln!(text, "{prefix}{connector}{name}  {}", child.node.is);
+        let deeper = if last { "    " } else { "│   " };
+        let child_prefix = format!("{prefix}{deeper}");
+        push_children(text, tree, child, &child_prefix);
     }
 }
 
