@@ -9,7 +9,9 @@
     "main is protected; work lands by squash-merged PR from feature/*, bug/* or chore/* branches."
   ],
   "entry_points": [
-    "src/main.rs"
+    "src/main.rs",
+    "src/cli.rs",
+    "src/schema.rs"
   ],
   "fs": [
     {
@@ -19,7 +21,7 @@
     },
     {
       "name": ".github/",
-      "role": "CI workflow: format · lint · test",
+      "role": "CI (format · lint · test) and the tag-triggered release workflow",
       "node": false
     },
     {
@@ -39,12 +41,22 @@
     },
     {
       "name": "Cargo.toml",
-      "role": "the one crate — bin `nodes`, edition 2024",
+      "role": "the one crate — bin `nodes`, edition 2024; deps clap, serde, serde_json",
+      "node": false
+    },
+    {
+      "name": "README.md",
+      "role": "the schema, the command table, canonical form, check rules, install",
       "node": false
     },
     {
       "name": "src/",
-      "role": "the CLI: schema structs, canonical form, the command set",
+      "role": "the CLI: schema.rs (the structs + newtypes), date.rs, repo.rs (discovery, read/write), tree.rs, refindex.rs, check.rs, render.rs, cli.rs",
+      "node": false
+    },
+    {
+      "name": "tests/",
+      "role": "cli.rs — end-to-end runs of the binary over a throwaway charted repo",
       "node": false
     }
   ],

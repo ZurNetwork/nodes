@@ -1,0 +1,45 @@
+name: Release
+# On a `vX.Y.Z` tag: build the `nodes` binary per target and attach the
+# archives to a GitHub Release, so consumers (Zurfur's `just nodes-install`)
+# download a prebuilt binary by exact tag instead of compiling the tool.
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      # The tag is the version: refuse to publish a binary that reports a different one.
+      - run: |
+          reported="$(target/${{ matrix.target }}/release/nodes --version | awk '{print $2}')"
+          tagged="${GITHUB_REF_NAME#v}"
+          test "$reported" = "$tagged" || { echo "binary reports $reported, tag says $tagged"; exit 1; }
+      - run: |
+          archive="nodes-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
+          tar -czf "$archive" -C "target/${{ matrix.target }}/release" nodes
+          shasum -a 256 "$archive" > "$archive.sha256"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            nodes-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            nodes-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
