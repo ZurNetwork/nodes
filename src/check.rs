@@ -115,19 +115,11 @@ fn check_path(node: &LoadedNode, findings: &mut Vec<Finding>) {
     findings.push(error(node, message));
 }
 
-/// Every `fs` entry flagged `node: true` names a direct child that has its own `NODE.json`.
+/// Every `fs` entry flagged `node: true` has a `NODE.json` at that path beneath this node — a nested
+/// name such as `src/account/` is allowed, so a pass-through directory need not carry a node of its own.
 fn check_fs_children(repo: &Repo, node: &LoadedNode, findings: &mut Vec<Finding>) {
     for entry in node.node.fs.iter().filter(|entry| entry.node) {
-        let child_name = entry.name.trim_end_matches('/');
-        if child_name.contains('/') {
-            let message = format!(
-                "fs entry `{}` says node: true but is not a direct child (fs lists direct children only)",
-                entry.name
-            );
-            findings.push(error(node, message));
-            continue;
-        }
-        let Ok(child) = node.location.join(child_name) else {
+        let Ok(child) = node.location.join(&entry.name) else {
             let message = format!(
                 "fs entry `{}` says node: true but is not a directory path",
                 entry.name
