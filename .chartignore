@@ -1,0 +1,4 @@
+# /chart — directories not worth a node. gitignore syntax. .gitignore is also honored.
+.git/
+target/
+.understand/

@@ -1,0 +1,61 @@
+{
+  "path": ".",
+  "charted": "2026-09-12",
+  "is": "nodes — the NODE.json normalizer and lookup CLI: a small Rust program that formats, validates and queries a repository's per-directory NODE.json chart files (Zurfur is the first consumer).",
+  "conventions": [
+    "Rust edition 2024; dependencies are serde, serde_json and clap (derive) — nothing else unless it earns its place.",
+    "The schema IS the serde structs (deny_unknown_fields); `nodes fmt` is parse → serialize and must be idempotent.",
+    "New code follows the Zurfur semantic style rulebook: newtypes for domain-meaningful primitives, named multi-line constructions, combinators over match-plumbing, std traits first, clarity over brevity.",
+    "main is protected; work lands by squash-merged PR from feature/*, bug/* or chore/* branches."
+  ],
+  "entry_points": [
+    "src/main.rs"
+  ],
+  "fs": [
+    {
+      "name": ".chartignore",
+      "role": "dirs /chart skips",
+      "node": false
+    },
+    {
+      "name": ".github/",
+      "role": "CI workflow: format · lint · test",
+      "node": false
+    },
+    {
+      "name": ".gitignore",
+      "role": "ignores target/",
+      "node": false
+    },
+    {
+      "name": ".understand/",
+      "role": "tracked /understand + /remember briefing snapshots",
+      "node": false
+    },
+    {
+      "name": "CLAUDE.md",
+      "role": "how to behave: roles, style rulebook pointer, branch strategy, commits",
+      "node": false
+    },
+    {
+      "name": "Cargo.toml",
+      "role": "the one crate — bin `nodes`, edition 2024",
+      "node": false
+    },
+    {
+      "name": "src/",
+      "role": "the CLI: schema structs, canonical form, the command set",
+      "node": false
+    }
+  ],
+  "refs": [
+    {
+      "page": 37519361,
+      "title": "Code Style — Semantic Rulings (Rust)",
+      "governs": "the shape of every Rust item in this crate"
+    }
+  ],
+  "notes": [
+    "The Zurfur repository consumes this tool (`just nodes …`, a PostToolUse hook, and `nodes check` in its gate); that wiring lives in Zurfur, not here."
+  ]
+}
