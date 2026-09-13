@@ -1,0 +1,63 @@
+name: Release
+# On a `vX.Y.Z` tag: build the `nodes` binary per target, then ONE job creates
+# the GitHub Release and attaches every archive — so consumers (Zurfur's
+# `just nodes-install`) download a prebuilt binary by exact tag instead of
+# compiling the tool. The matrix jobs only upload workflow artifacts; a single
+# publisher avoids the race of four jobs creating the same release at once.
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      # The tag is the version: refuse to publish a binary that reports a different one.
+      - run: |
+          reported="$(target/${{ matrix.target }}/release/nodes --version | awk '{print $2}')"
+          tagged="${GITHUB_REF_NAME#v}"
+          test "$reported" = "$tagged" || { echo "binary reports $reported, tag says $tagged"; exit 1; }
+      - run: |
+          mkdir -p dist
+          archive="nodes-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
+          tar -czf "dist/$archive" -C "target/${{ matrix.target }}/release" nodes
+          (cd dist && shasum -a 256 "$archive" > "$archive.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nodes-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+  release:
+    name: release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -l dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
