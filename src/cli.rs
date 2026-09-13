@@ -31,9 +31,9 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// The whole node tree, drawn: each node's name (relative to its parent node) + `is`.
+    /// The whole node tree, drawn: each node's name (relative to its parent node) + `short`.
     Tree,
-    /// Every node, one line each: path + `is`.
+    /// Every node, one line each: path + `short`.
     Ls,
     /// Root → … → node: the nodes a reader loads to understand a path.
     Chain {
@@ -43,12 +43,12 @@ pub enum Command {
     /// One node, or one field of it.
     Get {
         path: String,
-        /// path, charted, is, conventions, entry_points, fs, refs or notes.
+        /// path, charted, short, is, conventions, entry_points, fs, refs or notes.
         field: Option<Field>,
     },
     /// Every node citing a page.
     Refs { page: PageId },
-    /// Case-insensitive search over `is`, `fs[].role`, `conventions`, `notes`, `refs[].title` and `refs[].governs`.
+    /// Case-insensitive search over `short`, `is`, `fs[].role`, `conventions`, `notes`, `refs[].title` and `refs[].governs`.
     Find { term: String },
     /// Normalize NODE.json files in place (default: every one in the repository).
     Fmt {
@@ -186,14 +186,16 @@ fn subtree_json(tree: &NodeTree, node: &LoadedNode) -> Value {
         .into_iter()
         .map(|child| subtree_json(tree, child))
         .collect();
-    json!({ "path": node.location, "is": node.node.is, "children": children })
+    json!({ "path": node.location, "short": node.node.short, "is": node.node.is, "children": children })
 }
 
 fn ls(repo: &Repo, output: Output) -> Result<ExitCode, Error> {
     let tree = load_tree(repo)?;
     let value: Vec<Value> = tree
         .iter()
-        .map(|node| json!({ "path": node.location, "charted": node.node.charted, "is": node.node.is }))
+        .map(|node| {
+            json!({ "path": node.location, "charted": node.node.charted, "short": node.node.short, "is": node.node.is })
+        })
         .collect();
     Ok(output.emit(&value, &render::ls_text(&tree)))
 }
@@ -274,6 +276,7 @@ fn hits_in(node: &LoadedNode, needle: &str) -> Vec<Hit> {
             });
         }
     };
+    consider("short".to_owned(), &node.node.short);
     consider("is".to_owned(), &node.node.is);
     for entry in &node.node.fs {
         consider(format!("fs[{}].role", entry.name), &entry.role);

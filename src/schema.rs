@@ -20,6 +20,8 @@ pub struct Node {
     pub path: NodePath,
     /// The day this node was last charted.
     pub charted: ChartedDate,
+    /// A few words for listings (`tree`, `ls`): what this directory is, at a glance.
+    pub short: String,
     /// One sentence: what this directory IS.
     pub is: String,
     /// One rule per entry, terse; author order.
@@ -97,11 +99,12 @@ impl Node {
     }
 }
 
-/// The eight fields of a node, as `get` and `set` name them.
+/// The nine fields of a node, as `get` and `set` name them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
     Path,
     Charted,
+    Short,
     Is,
     Conventions,
     EntryPoints,
@@ -112,9 +115,10 @@ pub enum Field {
 
 impl Field {
     /// Every field, in schema order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Path,
         Self::Charted,
+        Self::Short,
         Self::Is,
         Self::Conventions,
         Self::EntryPoints,
@@ -128,6 +132,7 @@ impl Field {
         match self {
             Self::Path => "path",
             Self::Charted => "charted",
+            Self::Short => "short",
             Self::Is => "is",
             Self::Conventions => "conventions",
             Self::EntryPoints => "entry_points",
@@ -433,6 +438,7 @@ mod tests {
         r#"{
   "path": "backend/crates",
   "charted": "2026-09-12",
+  "short": "The crates",
   "is": "Twelve crates.",
   "conventions": ["b second", "a first"],
   "entry_points": ["src/lib.rs"],

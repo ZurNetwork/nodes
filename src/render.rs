@@ -9,6 +9,7 @@ use crate::tree::NodeTree;
 /// The whole node, every field labelled.
 pub fn node_text(node: &Node) -> String {
     let mut text = format!("{}  (charted {})\n", node.path, node.charted);
+    let _ = writeln!(text, "short: {}", node.short);
     let _ = writeln!(text, "is: {}", node.is);
     push_list(&mut text, "conventions", node.conventions.iter().cloned());
     push_list(&mut text, "entry_points", node.entry_points.iter().cloned());
@@ -23,6 +24,7 @@ pub fn field_text(node: &Node, field: Field) -> String {
     let lines: Vec<String> = match field {
         Field::Path => vec![node.path.to_string()],
         Field::Charted => vec![node.charted.to_string()],
+        Field::Short => vec![node.short.clone()],
         Field::Is => vec![node.is.clone()],
         Field::Conventions => node.conventions.clone(),
         Field::EntryPoints => node.entry_points.clone(),
@@ -37,23 +39,23 @@ pub fn field_text(node: &Node, field: Field) -> String {
     text
 }
 
-/// `path  is`, one line per node.
+/// `path  short`, one line per node.
 pub fn ls_text(tree: &NodeTree) -> String {
     let mut text = String::new();
     for node in tree.iter() {
-        let _ = writeln!(text, "{}  {}", node.location, node.node.is);
+        let _ = writeln!(text, "{}  {}", node.location, node.node.short);
     }
     text
 }
 
 /// The tree from the root, drawn with box connectors; each line names the node relative to its
-/// parent node (so a node two directories down reads `api/v1`) and states what it is.
+/// parent node (so a node two directories down reads `api/v1`) and gives its `short`.
 pub fn tree_text(tree: &NodeTree) -> String {
     let mut text = String::new();
     let Some(root) = tree.root() else {
         return text;
     };
-    let _ = writeln!(text, "{}  {}", root.location, root.node.is);
+    let _ = writeln!(text, "{}  {}", root.location, root.node.short);
     push_children(&mut text, tree, root, "");
     text
 }
@@ -68,7 +70,7 @@ fn push_children(text: &mut String, tree: &NodeTree, parent: &LoadedNode, prefix
             .location
             .relative(&child.location)
             .unwrap_or(child.location.as_str());
-        let _ = writeln!(text, "{prefix}{connector}{name}  {}", child.node.is);
+        let _ = writeln!(text, "{prefix}{connector}{name}  {}", child.node.short);
         let deeper = if last { "    " } else { "│   " };
         let child_prefix = format!("{prefix}{deeper}");
         push_children(text, tree, child, &child_prefix);

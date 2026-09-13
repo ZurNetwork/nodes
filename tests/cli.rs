@@ -149,6 +149,7 @@ fn node(
     let value = json!({
         "path": path,
         "charted": "2026-09-12",
+        "short": is.trim_end_matches('.'),
         "is": is,
         "conventions": [],
         "entry_points": [],
@@ -164,7 +165,7 @@ fn node(
 #[test]
 fn fmt_normalizes_once_and_is_then_a_no_op() {
     let repo = TempRepo::charted();
-    let messy = r#"{"notes": [], "refs": [{"governs": "b", "title": "B", "page": 20}, {"page": 10, "title": "A", "governs": "a"}],
+    let messy = r#"{"notes": [], "short": "Messy", "refs": [{"governs": "b", "title": "B", "page": 20}, {"page": 10, "title": "A", "governs": "a"}],
         "fs": [{"name": "z/", "role": "last", "node": false}, {"name": "a/", "role": "first", "node": false}],
         "entry_points": ["x"], "conventions": ["c"], "is": "Messy.", "charted": "2026-01-02", "path": "backend/crates"}"#;
     repo.write("backend/crates/NODE.json", messy);
@@ -175,7 +176,7 @@ fn fmt_normalizes_once_and_is_then_a_no_op() {
         .expect("valid")
         .canonical_json();
     assert_eq!(formatted, expected);
-    let canonical_head = "{\n  \"path\": \"backend/crates\",\n  \"charted\": \"2026-01-02\",\n  \"is\": \"Messy.\",\n";
+    let canonical_head = "{\n  \"path\": \"backend/crates\",\n  \"charted\": \"2026-01-02\",\n  \"short\": \"Messy\",\n  \"is\": \"Messy.\",\n";
     assert!(formatted.starts_with(canonical_head), "{formatted}");
     let a_before_z = formatted.find("\"a/\"").expect("a/") < formatted.find("\"z/\"").expect("z/");
     assert!(a_before_z, "fs sorted by name");
@@ -280,16 +281,16 @@ fn tree_ls_and_chain_walk_the_tree_in_order() {
     let repo = TempRepo::charted();
     let tree = repo.ok(&["tree"]);
     let drawn = "\
-.  The whole repository.
-├── backend  The backend.
-│   └── crates  Twelve crates in a hexagon.
-└── frontend  The client tier.
+.  The whole repository
+├── backend  The backend
+│   └── crates  Twelve crates in a hexagon
+└── frontend  The client tier
 ";
     assert_eq!(tree, drawn);
     let ls = repo.ok(&["ls"]);
     assert_eq!(
         ls,
-        ".  The whole repository.\nbackend  The backend.\nbackend/crates  Twelve crates in a hexagon.\nfrontend  The client tier.\n"
+        ".  The whole repository\nbackend  The backend\nbackend/crates  Twelve crates in a hexagon\nfrontend  The client tier\n"
     );
     let chain = repo.ok(&["--json", "chain", "backend/crates/api/src/lib.rs"]);
     let parsed: Value = serde_json::from_str(&chain).expect("json");
@@ -320,10 +321,12 @@ fn get_refs_and_find_look_things_up() {
     let whole = repo.ok(&["get", "."]);
     assert!(
         whole.starts_with(
-            ".  (charted 2026-09-12)\nis: The whole repository.\nconventions: (none)\n"
+            ".  (charted 2026-09-12)\nshort: The whole repository\nis: The whole repository.\nconventions: (none)\n"
         ),
         "{whole}"
     );
+    let short = repo.ok(&["get", ".", "short"]);
+    assert_eq!(short, "The whole repository\n");
     let (_, stderr) = repo.fails(&["get", "nowhere"]);
     assert_eq!(stderr, "nodes: no node charted at `nowhere`\n");
     let citing = repo.ok(&["refs", "55836674"]);
@@ -414,7 +417,7 @@ fn the_root_is_discovered_from_any_directory_beneath_it() {
         .expect("runs");
     assert!(from_below.status.success());
     let listed = String::from_utf8(from_below.stdout).expect("utf-8");
-    assert!(listed.starts_with(".  The whole repository.\n"));
+    assert!(listed.starts_with(".  The whole repository\n"));
     let nowhere = TempRepo::new();
     let outside = Command::new(env!("CARGO_BIN_EXE_nodes"))
         .current_dir(Path::new(&nowhere.root))

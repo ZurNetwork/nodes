@@ -10,6 +10,7 @@ Every `NODE.json` has exactly these fields, in this order; unknown keys are refu
 {
   "path": "backend/crates",
   "charted": "2026-09-12",
+  "short": "A few words, for listings",
   "is": "One sentence: what this directory IS.",
   "conventions": ["one rule per entry"],
   "entry_points": ["src/lib.rs"],
@@ -19,18 +20,18 @@ Every `NODE.json` has exactly these fields, in this order; unknown keys are refu
 }
 ```
 
-`path` is the repo-relative directory (`.` for the root). `fs` lists the direct children worth naming; `node: true` means the child carries its own `NODE.json`. `refs` is the only place code points at design: a page id, its title, and what it governs here.
+`path` is the repo-relative directory (`.` for the root). `short` is what `tree` and `ls` print — a noun phrase, no period; `is` is the full sentence. `fs` lists the direct children worth naming; `node: true` means the child carries its own `NODE.json`. `refs` is the only place code points at design: a page id, its title, and what it governs here.
 
 ## Commands
 
 | Command | Does |
 |---|---|
-| `nodes tree` | the whole tree, drawn: each node's name + `is` |
-| `nodes ls` | every node, one line each |
+| `nodes tree` | the whole tree, drawn: each node's name + `short` |
+| `nodes ls` | every node, one line each: path + `short` |
 | `nodes chain <path>` | root → … → node: what to read to understand a path |
 | `nodes get <path> [field]` | one node, or one field of it |
 | `nodes refs <page>` | every node citing a page |
-| `nodes find <term>` | search `is`, `fs[].role`, `conventions`, `notes`, `refs[].title/governs` |
+| `nodes find <term>` | search `short`, `is`, `fs[].role`, `conventions`, `notes`, `refs[].title/governs` |
 | `nodes fmt [file…]` | normalize in place (default: every `NODE.json`) |
 | `nodes check [--ref-index FILE]` | validate; exit 1 on any error |
 | `nodes set <path> <field> <json>` | replace one field, then normalize |
@@ -41,15 +42,15 @@ Every `NODE.json` has exactly these fields, in this order; unknown keys are refu
 
 ```
 $ nodes tree
-.  Zurfur — an AT Protocol-native art-commission platform: …
-├── backend  The Rust backend: a pure `domain` core, …
-│   └── crates  Twelve workspace crates arranged as a hexagon: …
-│       ├── adapter-atproto  The public data boundary: …
-│       └── api  The HTTP driving adapter over `composition::Runtime`: …
-│           └── src  Composition (lib/main) plus the cross-cutting HTTP concerns …
-└── contract  The API contract — protobuf as the independent IDL, …
-    └── zurfur  Pass-through namespace directory …
-        └── api/v1  The v1 corpus — package `zurfur.api.v1`, …
+.  The Zurfur monorepo: Rust backend, SvelteKit frontend, contract, lexicons
+├── backend  The Rust backend (ports and adapters)
+│   └── crates  The twelve workspace crates
+│       ├── adapter-atproto  Public boundary: the AT Protocol adapter
+│       └── api  The axum HTTP driver
+│           └── src  Composition + cross-cutting HTTP concerns
+└── contract  The protobuf API contract, authoritative over both tiers
+    └── zurfur  Pass-through to api/v1
+        └── api/v1  The v1 proto corpus
 ```
 
 A node beneath a pass-through directory is named by its path from the parent node (`api/v1`). `--json` keeps full paths (`{path, is, children}`).
