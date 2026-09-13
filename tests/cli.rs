@@ -408,6 +408,26 @@ fn write_commands_edit_one_field_and_leave_canonical_files() {
 }
 
 #[test]
+fn a_closed_stdout_ends_the_run_quietly() {
+    let repo = TempRepo::charted();
+    let (reader, writer) = std::io::pipe().expect("a pipe");
+    drop(reader);
+    let output = Command::new(env!("CARGO_BIN_EXE_nodes"))
+        .arg("--root")
+        .arg(&repo.root)
+        .arg("tree")
+        .stdout(writer)
+        .output()
+        .expect("runs");
+    assert!(output.status.success(), "exit {:?}", output.status);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "",
+        "no panic, no error line"
+    );
+}
+
+#[test]
 fn the_root_is_discovered_from_any_directory_beneath_it() {
     let repo = TempRepo::charted();
     let from_below = Command::new(env!("CARGO_BIN_EXE_nodes"))

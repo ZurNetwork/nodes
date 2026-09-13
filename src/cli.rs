@@ -1,5 +1,6 @@
 //! The command line: argument parsing and one function per command.
 
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -98,25 +99,42 @@ struct Output {
 }
 
 impl Output {
-    fn emit(self, value: &impl Serialize, text: &str) -> ExitCode {
+    fn emit(self, value: &impl Serialize, text: &str) -> Result<ExitCode, Error> {
         if self.json {
-            let rendered = serde_json::to_string_pretty(value).expect("output values serialize");
-            println!("{rendered}");
+            let mut rendered =
+                serde_json::to_string_pretty(value).expect("output values serialize");
+            rendered.push('\n');
+            print(&rendered)?;
         } else {
-            print!("{text}");
+            print(text)?;
         }
-        ExitCode::SUCCESS
+        Ok(ExitCode::SUCCESS)
     }
 
     /// After a write: silent in text mode, the updated node in JSON mode.
-    fn written(self, node: &Node) -> ExitCode {
+    fn written(self, node: &Node) -> Result<ExitCode, Error> {
         if self.json {
             let canonical = node.clone().canonical();
-            let rendered =
+            let mut rendered =
                 serde_json::to_string_pretty(&canonical).expect("a Node always serializes");
-            println!("{rendered}");
+            rendered.push('\n');
+            print(&rendered)?;
         }
-        ExitCode::SUCCESS
+        Ok(ExitCode::SUCCESS)
+    }
+}
+
+/// Writes to stdout. A reader that went away (`nodes tree | head`) closes the pipe; that ends the
+/// output quietly instead of failing the run.
+fn print(text: &str) -> Result<(), Error> {
+    let mut stdout = io::stdout().lock();
+    let written = stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush());
+    match written {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(source) => Err(Error::io("<stdout>", source)),
     }
 }
 
@@ -177,7 +195,7 @@ fn tree(repo: &Repo, output: Output) -> Result<ExitCode, Error> {
         .root()
         .ok_or_else(|| Error::UnknownNode(NodePath::root()))?;
     let value = subtree_json(&tree, root);
-    Ok(output.emit(&value, &render::tree_text(&tree)))
+    output.emit(&value, &render::tree_text(&tree))
 }
 
 fn subtree_json(tree: &NodeTree, node: &LoadedNode) -> Value {
@@ -197,7 +215,7 @@ fn ls(repo: &Repo, output: Output) -> Result<ExitCode, Error> {
             json!({ "path": node.location, "charted": node.node.charted, "short": node.node.short, "is": node.node.is })
         })
         .collect();
-    Ok(output.emit(&value, &render::ls_text(&tree)))
+    output.emit(&value, &render::ls_text(&tree))
 }
 
 fn chain(repo: &Repo, input: &str, output: Output) -> Result<ExitCode, Error> {
@@ -210,16 +228,16 @@ fn chain(repo: &Repo, input: &str, output: Output) -> Result<ExitCode, Error> {
         .map(|node| render::node_text(&node.node))
         .collect::<Vec<_>>()
         .join("\n");
-    Ok(output.emit(&value, &text))
+    output.emit(&value, &text)
 }
 
 fn get(repo: &Repo, input: &str, field: Option<Field>, output: Output) -> Result<ExitCode, Error> {
     let loaded = read_node(repo, input)?;
     let Some(field) = field else {
-        return Ok(output.emit(&loaded.node, &render::node_text(&loaded.node)));
+        return output.emit(&loaded.node, &render::node_text(&loaded.node));
     };
     let value = loaded.node.field(field);
-    Ok(output.emit(&value, &render::field_text(&loaded.node, field)))
+    output.emit(&value, &render::field_text(&loaded.node, field))
 }
 
 fn refs(repo: &Repo, page: PageId, output: Output) -> Result<ExitCode, Error> {
@@ -240,7 +258,7 @@ fn refs(repo: &Repo, page: PageId, output: Output) -> Result<ExitCode, Error> {
             )
         })
         .collect();
-    Ok(output.emit(&value, &text))
+    output.emit(&value, &text)
 }
 
 /// One place a search term was found.
@@ -262,7 +280,7 @@ fn find(repo: &Repo, term: &str, output: Output) -> Result<ExitCode, Error> {
         .iter()
         .map(|hit| format!("{}  {}: {}\n", hit.path, hit.field, hit.text))
         .collect();
-    Ok(output.emit(&hits, &text))
+    output.emit(&hits, &text)
 }
 
 fn hits_in(node: &LoadedNode, needle: &str) -> Vec<Hit> {
@@ -324,7 +342,7 @@ fn fmt(repo: &Repo, files: &[PathBuf], output: Output) -> Result<ExitCode, Error
         .filter(|entry| entry.changed)
         .map(|entry| format!("fmt: {}\n", entry.file))
         .collect();
-    Ok(output.emit(&visited, &text))
+    output.emit(&visited, &text)
 }
 
 /// A `fmt` argument as the file to format: absolute as given, otherwise under the root; a directory means its NODE.json.
@@ -358,7 +376,7 @@ fn check(repo: &Repo, args: CheckArgs, output: Output) -> Result<ExitCode, Error
         "{} nodes, {} errors, {} warnings\n",
         report.nodes, report.errors, report.warnings
     ));
-    output.emit(&report, &text);
+    output.emit(&report, &text)?;
     let code = if report.is_clean() {
         ExitCode::SUCCESS
     } else {
@@ -393,7 +411,7 @@ fn set(
         .with_field(field, value)
         .map_err(|source| Error::InvalidValue { field, source })?;
     repo.write(&loaded.file, &updated)?;
-    Ok(output.written(&updated))
+    output.written(&updated)
 }
 
 fn add_ref(
@@ -413,7 +431,7 @@ fn add_ref(
     };
     loaded.node.refs.push(added);
     repo.write(&loaded.file, &loaded.node)?;
-    Ok(output.written(&loaded.node))
+    output.written(&loaded.node)
 }
 
 fn rm_ref(repo: &Repo, input: &str, page: PageId, output: Output) -> Result<ExitCode, Error> {
@@ -427,7 +445,7 @@ fn rm_ref(repo: &Repo, input: &str, page: PageId, output: Output) -> Result<Exit
         });
     }
     repo.write(&loaded.file, &loaded.node)?;
-    Ok(output.written(&loaded.node))
+    output.written(&loaded.node)
 }
 
 fn touch(
@@ -439,5 +457,5 @@ fn touch(
     let mut loaded = read_node(repo, input)?;
     loaded.node.charted = date.unwrap_or_else(ChartedDate::today_utc);
     repo.write(&loaded.file, &loaded.node)?;
-    Ok(output.written(&loaded.node))
+    output.written(&loaded.node)
 }
