@@ -279,10 +279,13 @@ fn check_reports_every_rule_and_exits_one() {
 fn tree_ls_and_chain_walk_the_tree_in_order() {
     let repo = TempRepo::charted();
     let tree = repo.ok(&["tree"]);
-    assert_eq!(
-        tree,
-        ".  The whole repository.\n  backend  The backend.\n    backend/crates  Twelve crates in a hexagon.\n  frontend  The client tier.\n"
-    );
+    let drawn = "\
+.  The whole repository.
+├── backend  The backend.
+│   └── crates  Twelve crates in a hexagon.
+└── frontend  The client tier.
+";
+    assert_eq!(tree, drawn);
     let ls = repo.ok(&["ls"]);
     assert_eq!(
         ls,

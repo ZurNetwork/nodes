@@ -1,6 +1,6 @@
 [package]
 name = "nodes"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "NODE.json normalizer and lookup CLI — formats, validates and queries a repository's per-directory chart files"
 repository = "https://github.com/ZurNetwork/nodes"

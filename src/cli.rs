@@ -31,7 +31,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// The whole node tree, indented: path + `is`.
+    /// The whole node tree, drawn: each node's name (relative to its parent node) + `is`.
     Tree,
     /// Every node, one line each: path + `is`.
     Ls,
