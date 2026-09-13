@@ -31,6 +31,11 @@ impl TempRepo {
             "The whole repository.",
             &[
                 ("backend/", "the Rust workspace", true),
+                (
+                    "backend/crates/",
+                    "the members, charted two levels down",
+                    true,
+                ),
                 ("docs/", "pointers", false),
                 ("frontend/", "the web app", true),
             ],
@@ -225,7 +230,7 @@ fn check_reports_every_rule_and_exits_one() {
         &[
             ("crates/", "members", true),
             ("ghost/", "absent", true),
-            ("deep/child/", "nested", true),
+            ("deep/child/", "nested, absent", true),
         ],
         &[],
         &[],
@@ -249,7 +254,7 @@ fn check_reports_every_rule_and_exits_one() {
         "error: docs: ",
         "error: backend: path is `backend/elsewhere` but the file sits at `backend`",
         "error: backend: fs entry `ghost/` says node: true but `backend/ghost` has no NODE.json",
-        "error: backend: fs entry `deep/child/` says node: true but is not a direct child",
+        "error: backend: fs entry `deep/child/` says node: true but `backend/deep/child` has no NODE.json",
         "error: frontend/web: not listed in `frontend`'s fs",
         "error: frontend/web: page 11763713 is cited more than once",
         "error: frontend/web: ref 99 (Nowhere) is not in the ref index",

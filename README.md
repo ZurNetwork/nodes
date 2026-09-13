@@ -47,7 +47,7 @@ Every `NODE.json` has exactly these fields, in this order; unknown keys are refu
 
 - schema: every file parses, unknown keys are errors, `charted` is a real date;
 - `path` matches where the file sits;
-- every `fs` entry with `node: true` names a direct child that has its own `NODE.json`, and every node directly beneath another node is listed there with `node: true`;
+- every `fs` entry with `node: true` has a `NODE.json` at that path (a nested name like `src/account/` is allowed, so a pass-through directory needs no node of its own), and every node directly beneath another node is listed there with `node: true`;
 - a node cites a page at most once;
 - with `--ref-index <file>`: every cited page appears in that file (a line's first run of digits is its page id), and a page whose line carries the superseded marker (`SUPERSEDED` by default, `--superseded-marker` to change) warns.
 
