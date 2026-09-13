@@ -37,7 +37,7 @@ Every `NODE.json` has exactly these fields, in this order; unknown keys are refu
 | `nodes add-ref <path> <page> <title> <governs>` / `nodes rm-ref <path> <page>` | ref edits |
 | `nodes touch <path> [--date YYYY-MM-DD]` | set `charted` to today |
 
-`--json` on any command emits JSON for machine consumers. The repository root is the nearest ancestor of the current directory holding a `NODE.json` whose `path` is `.`; `--root <dir>` overrides.
+`--json` on any command emits JSON for machine consumers; a write command prints nothing in text mode and the updated node with `--json`. The repository root is the nearest ancestor of the current directory holding a `NODE.json` whose `path` is `.`; `--root <dir>` overrides.
 
 ## Canonical form
 
@@ -47,7 +47,7 @@ Every `NODE.json` has exactly these fields, in this order; unknown keys are refu
 
 - schema: every file parses, unknown keys are errors, `charted` is a real date;
 - `path` matches where the file sits;
-- every `fs` entry with `node: true` has a `NODE.json` beneath it, and every node directly beneath another node is listed there with `node: true`;
+- every `fs` entry with `node: true` names a direct child that has its own `NODE.json`, and every node directly beneath another node is listed there with `node: true`;
 - a node cites a page at most once;
 - with `--ref-index <file>`: every cited page appears in that file (a line's first run of digits is its page id), and a page whose line carries the superseded marker (`SUPERSEDED` by default, `--superseded-marker` to change) warns.
 

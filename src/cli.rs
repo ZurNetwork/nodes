@@ -12,7 +12,7 @@ use crate::error::Error;
 use crate::refindex::DEFAULT_SUPERSEDED_MARKER;
 use crate::render;
 use crate::repo::{LoadedNode, Repo};
-use crate::schema::{ChartedDate, Field, NODE_FILE, NodePath, PageId, Ref};
+use crate::schema::{ChartedDate, Field, NODE_FILE, Node, NodePath, PageId, Ref};
 use crate::tree::NodeTree;
 
 /// NODE.json normalizer and lookup.
@@ -107,6 +107,17 @@ impl Output {
         }
         ExitCode::SUCCESS
     }
+
+    /// After a write: silent in text mode, the updated node in JSON mode.
+    fn written(self, node: &Node) -> ExitCode {
+        if self.json {
+            let canonical = node.clone().canonical();
+            let rendered =
+                serde_json::to_string_pretty(&canonical).expect("a Node always serializes");
+            println!("{rendered}");
+        }
+        ExitCode::SUCCESS
+    }
 }
 
 /// Runs one command; the exit code is `1` for a failed `check`, `0` otherwise.
@@ -122,15 +133,15 @@ pub fn run(cli: Cli) -> Result<ExitCode, Error> {
         Command::Find { term } => find(&repo, &term, output),
         Command::Fmt { files } => fmt(&repo, &files, output),
         Command::Check(args) => check(&repo, args, output),
-        Command::Set { path, field, value } => set(&repo, &path, field, &value),
+        Command::Set { path, field, value } => set(&repo, &path, field, &value, output),
         Command::AddRef {
             path,
             page,
             title,
             governs,
-        } => add_ref(&repo, &path, page, title, governs),
-        Command::RmRef { path, page } => rm_ref(&repo, &path, page),
-        Command::Touch { path, date } => touch(&repo, &path, date),
+        } => add_ref(&repo, &path, page, title, governs, output),
+        Command::RmRef { path, page } => rm_ref(&repo, &path, page, output),
+        Command::Touch { path, date } => touch(&repo, &path, date, output),
     }
 }
 
@@ -191,7 +202,7 @@ fn chain(repo: &Repo, input: &str, output: Output) -> Result<ExitCode, Error> {
     let target = repo.node_path(input)?;
     let tree = load_tree(repo)?;
     let chain = tree.chain(&target);
-    let value: Vec<&crate::schema::Node> = chain.iter().map(|node| &node.node).collect();
+    let value: Vec<&Node> = chain.iter().map(|node| &node.node).collect();
     let text = chain
         .iter()
         .map(|node| render::node_text(&node.node))
@@ -362,7 +373,13 @@ fn fmt_target_file(repo: &Repo, given: &Path) -> PathBuf {
     }
 }
 
-fn set(repo: &Repo, input: &str, field: Field, raw: &str) -> Result<ExitCode, Error> {
+fn set(
+    repo: &Repo,
+    input: &str,
+    field: Field,
+    raw: &str,
+    output: Output,
+) -> Result<ExitCode, Error> {
     if field == Field::Path {
         return Err(Error::PathIsDerived);
     }
@@ -373,7 +390,7 @@ fn set(repo: &Repo, input: &str, field: Field, raw: &str) -> Result<ExitCode, Er
         .with_field(field, value)
         .map_err(|source| Error::InvalidValue { field, source })?;
     repo.write(&loaded.file, &updated)?;
-    Ok(ExitCode::SUCCESS)
+    Ok(output.written(&updated))
 }
 
 fn add_ref(
@@ -382,6 +399,7 @@ fn add_ref(
     page: PageId,
     title: String,
     governs: String,
+    output: Output,
 ) -> Result<ExitCode, Error> {
     let mut loaded = read_node(repo, input)?;
     loaded.node.refs.retain(|reference| reference.page != page);
@@ -392,10 +410,10 @@ fn add_ref(
     };
     loaded.node.refs.push(added);
     repo.write(&loaded.file, &loaded.node)?;
-    Ok(ExitCode::SUCCESS)
+    Ok(output.written(&loaded.node))
 }
 
-fn rm_ref(repo: &Repo, input: &str, page: PageId) -> Result<ExitCode, Error> {
+fn rm_ref(repo: &Repo, input: &str, page: PageId, output: Output) -> Result<ExitCode, Error> {
     let mut loaded = read_node(repo, input)?;
     let before = loaded.node.refs.len();
     loaded.node.refs.retain(|reference| reference.page != page);
@@ -406,12 +424,17 @@ fn rm_ref(repo: &Repo, input: &str, page: PageId) -> Result<ExitCode, Error> {
         });
     }
     repo.write(&loaded.file, &loaded.node)?;
-    Ok(ExitCode::SUCCESS)
+    Ok(output.written(&loaded.node))
 }
 
-fn touch(repo: &Repo, input: &str, date: Option<ChartedDate>) -> Result<ExitCode, Error> {
+fn touch(
+    repo: &Repo,
+    input: &str,
+    date: Option<ChartedDate>,
+    output: Output,
+) -> Result<ExitCode, Error> {
     let mut loaded = read_node(repo, input)?;
     loaded.node.charted = date.unwrap_or_else(ChartedDate::today_utc);
     repo.write(&loaded.file, &loaded.node)?;
-    Ok(ExitCode::SUCCESS)
+    Ok(output.written(&loaded.node))
 }

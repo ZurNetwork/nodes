@@ -222,7 +222,11 @@ fn check_reports_every_rule_and_exits_one() {
     let wrong_path = node(
         "backend/elsewhere",
         "Mislocated.",
-        &[("crates/", "members", true), ("ghost/", "absent", true)],
+        &[
+            ("crates/", "members", true),
+            ("ghost/", "absent", true),
+            ("deep/child/", "nested", true),
+        ],
         &[],
         &[],
     );
@@ -245,10 +249,11 @@ fn check_reports_every_rule_and_exits_one() {
         "error: docs: ",
         "error: backend: path is `backend/elsewhere` but the file sits at `backend`",
         "error: backend: fs entry `ghost/` says node: true but `backend/ghost` has no NODE.json",
+        "error: backend: fs entry `deep/child/` says node: true but is not a direct child",
         "error: frontend/web: not listed in `frontend`'s fs",
         "error: frontend/web: page 11763713 is cited more than once",
         "error: frontend/web: ref 99 (Nowhere) is not in the ref index",
-        "5 nodes, 6 errors, 1 warnings",
+        "5 nodes, 7 errors, 1 warnings",
     ];
     for line in expected_lines {
         assert!(stdout.contains(line), "missing {line:?} in:\n{stdout}");
@@ -379,6 +384,12 @@ fn write_commands_edit_one_field_and_leave_canonical_files() {
     assert_eq!(repo.ok(&["get", "frontend", "charted"]), "2030-01-31\n");
     let (_, stderr) = repo.fails(&["touch", "frontend", "--date", "2030-02-30"]);
     assert!(stderr.contains("does not exist in month 2"), "{stderr}");
+    let touched = repo.ok(&["--json", "touch", "frontend", "--date", "2031-01-01"]);
+    let written: Value = serde_json::from_str(&touched).expect("json");
+    assert_eq!(written["path"], "frontend");
+    assert_eq!(written["charted"], "2031-01-01");
+    let silent = repo.ok(&["set", "frontend", "notes", "[]"]);
+    assert_eq!(silent, "", "text mode stays silent");
     let after_edits = repo.read("frontend/NODE.json");
     let refmt = repo.ok(&["fmt", "frontend"]);
     assert_eq!(refmt, "", "every write command leaves a canonical file");

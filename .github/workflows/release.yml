@@ -1,12 +1,14 @@
 name: Release
-# On a `vX.Y.Z` tag: build the `nodes` binary per target and attach the
-# archives to a GitHub Release, so consumers (Zurfur's `just nodes-install`)
-# download a prebuilt binary by exact tag instead of compiling the tool.
+# On a `vX.Y.Z` tag: build the `nodes` binary per target, then ONE job creates
+# the GitHub Release and attaches every archive — so consumers (Zurfur's
+# `just nodes-install`) download a prebuilt binary by exact tag instead of
+# compiling the tool. The matrix jobs only upload workflow artifacts; a single
+# publisher avoids the race of four jobs creating the same release at once.
 on:
   push:
     tags: ['v*']
 permissions:
-  contents: write
+  contents: read
 jobs:
   build:
     name: build (${{ matrix.target }})
@@ -35,11 +37,27 @@ jobs:
           tagged="${GITHUB_REF_NAME#v}"
           test "$reported" = "$tagged" || { echo "binary reports $reported, tag says $tagged"; exit 1; }
       - run: |
+          mkdir -p dist
           archive="nodes-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
-          tar -czf "$archive" -C "target/${{ matrix.target }}/release" nodes
-          shasum -a 256 "$archive" > "$archive.sha256"
+          tar -czf "dist/$archive" -C "target/${{ matrix.target }}/release" nodes
+          (cd dist && shasum -a 256 "$archive" > "$archive.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nodes-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+  release:
+    name: release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -l dist
       - uses: softprops/action-gh-release@v2
         with:
-          files: |
-            nodes-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
-            nodes-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+          files: dist/*
