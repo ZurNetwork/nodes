@@ -1,21 +1,26 @@
 //! The command line: argument parsing and one function per command.
 
+use std::fmt;
 use std::io::{self, Write as _};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::str::FromStr;
 
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::check::{self, CheckOptions};
+use crate::date::ModifiedTime;
 use crate::error::Error;
+use crate::fuzzy::{self, Score};
+use crate::grep::{self, Needle, Searched};
 use crate::refindex::DEFAULT_SUPERSEDED_MARKER;
 use crate::render;
-use crate::repo::{LoadedNode, Repo};
-use crate::schema::{
-    Category, ChartedDate, Field, NODE_FILE, Node, NodePath, NodeType, PageId, Ref,
-};
+use crate::repo::{Content, LoadedNode, Repo};
+use crate::schema::{ChartedDate, Field, NODE_FILE, Node, NodePath, NodeType, PageId, Ref, Tag};
+use crate::tag::MalformedTag;
 use crate::tree::{NodeTree, Pruned};
 
 /// NODE.json normalizer and lookup.
@@ -48,13 +53,37 @@ pub enum Command {
     /// One node, or one field of it.
     Get {
         path: String,
-        /// path, charted, short, is, type, categories, conventions, entry_points, fs, refs or notes.
+        /// path, charted, short, is, type, tags, conventions, entry_points, fs, refs or notes.
         field: Option<Field>,
     },
     /// Every node citing a page.
     Refs { page: PageId },
-    /// Case-insensitive search over `short`, `is`, `type`, `categories`, `fs[].role`, `conventions`, `notes`, `refs[].title` and `refs[].governs`.
+    /// Case-insensitive search over `short`, `is`, `type`, `tags`, `fs[].role`, `conventions`, `notes`, `refs[].title` and `refs[].governs`.
     Find { term: String },
+    /// Case-insensitive full-text search over what the tree holds — `find` searches the chart,
+    /// `grep` the text files it charts: path (the owning node), file, line and the line's text.
+    /// Ignored, hidden and binary files are passed by; `NODE.json` files are `find`'s.
+    Grep {
+        term: Needle,
+        /// Stop after this many hits (default: every hit).
+        #[arg(long, value_name = "N")]
+        limit: Option<Limit>,
+    },
+    /// The files modified most recently, newest first: modification time (UTC) + file.
+    Recent {
+        /// A repo-relative directory (default: the root).
+        path: Option<String>,
+        /// How many files to list.
+        #[arg(long, value_name = "N", default_value = "10")]
+        limit: Limit,
+    },
+    /// The nodes and files a partial or slightly-off name most likely means, best first.
+    Resolve {
+        query: String,
+        /// How many candidates to list.
+        #[arg(long, value_name = "N", default_value = "10")]
+        limit: Limit,
+    },
     /// Normalize NODE.json files in place (default: every one in the repository).
     Fmt {
         /// NODE.json files or their directories, repo-relative or absolute.
@@ -77,16 +106,20 @@ pub enum Command {
     },
     /// Remove the ref citing a page.
     RmRef { path: String, page: PageId },
-    /// Set `type` and `categories` together — also on a file written before they existed.
+    /// Set `type` and the `category:` tags together — also on a file written before they existed.
+    /// The node's other tags are kept, after the categories.
     Classify {
         path: String,
         /// The one broad kind that fits best (see `nodes vocabulary`).
         node_type: NodeType,
-        /// What the directory specifically holds, most fitting first.
-        #[arg(required = true)]
-        categories: Vec<Category>,
+        /// What the directory specifically holds, most fitting first: `ui` is tagged `category:ui`.
+        #[arg(required = true, value_name = "CATEGORY", value_parser = category_tag)]
+        categories: Vec<Tag>,
     },
-    /// The closed vocabularies of `type` and `categories`, each term with its meaning.
+    /// Rewrite every node written before `tags` existed (up to v0.5): its ranked `categories`
+    /// become `category:` tags. Also normalizes, like `fmt`; a second run changes nothing.
+    Migrate,
+    /// The closed vocabulary of `type`, each term with its meaning.
     Vocabulary,
     /// Set `charted` to today (UTC), or to --date.
     Touch {
@@ -96,32 +129,81 @@ pub enum Command {
     },
 }
 
-/// Which nodes a listing keeps: by type, by category, both, or — with neither — all.
+/// Which nodes a listing keeps: by type, by tags, both, or — with neither — all.
 #[derive(Debug, Args)]
 pub struct Selection {
-    /// Only nodes carrying this category; `ls` lists them best fit first (by its rank in each node's list).
-    #[arg(long, value_name = "CATEGORY")]
-    pub category: Option<Category>,
+    /// Only nodes carrying this tag (`word` or `namespace:word`); repeat it to require several.
+    #[arg(long = "tag", value_name = "TAG")]
+    pub tags: Vec<Tag>,
+    /// Only nodes carrying `category:CATEGORY` — short for `--tag category:CATEGORY`. `ls` lists
+    /// them best fit first (by the category's rank among each node's categories).
+    #[arg(long, value_name = "CATEGORY", value_parser = category_tag)]
+    pub category: Option<Tag>,
     /// Only nodes of this type.
     #[arg(long = "type", value_name = "TYPE")]
     pub node_type: Option<NodeType>,
 }
 
 impl Selection {
+    /// Every tag a node must carry, `--category` first.
+    fn selected_tags(&self) -> impl Iterator<Item = &Tag> {
+        self.category.iter().chain(&self.tags)
+    }
+
     fn is_everything(&self) -> bool {
-        self.category.is_none() && self.node_type.is_none()
+        self.node_type.is_none() && self.selected_tags().next().is_none()
     }
 
     fn admits(&self, node: &Node) -> bool {
         let type_fits = self
             .node_type
             .is_none_or(|node_type| node.node_type == node_type);
-        let category_fits = self
-            .category
-            .is_none_or(|category| node.categories.rank_of(category).is_some());
-        type_fits && category_fits
+        let tags_fit = self.selected_tags().all(|tag| node.tags.carries(tag));
+        type_fits && tags_fit
+    }
+
+    /// The category `ls` ranks by: the first one selected, however it was spelled.
+    fn ranking_category(&self) -> Option<&Tag> {
+        self.selected_tags().find(|tag| tag.is_category())
     }
 }
+
+/// A category word as the tag it stands for: `ui` is `category:ui`.
+fn category_tag(word: &str) -> Result<Tag, MalformedTag> {
+    Tag::category(word)
+}
+
+/// How many entries a listing is cut to: a whole number from 1 up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limit(NonZeroUsize);
+
+/// An argument that is not a [`Limit`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct NotALimit(String);
+
+impl Limit {
+    pub const fn get(self) -> usize {
+        self.0.get()
+    }
+}
+
+impl FromStr for Limit {
+    type Err = NotALimit;
+
+    fn from_str(text: &str) -> Result<Self, NotALimit> {
+        text.parse::<NonZeroUsize>()
+            .map(Self)
+            .map_err(|_| NotALimit(text.to_owned()))
+    }
+}
+
+impl fmt::Display for NotALimit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "`{}` is not a limit: a whole number from 1 up", self.0)
+    }
+}
+
+impl std::error::Error for NotALimit {}
 
 #[derive(Debug, Args)]
 pub struct CheckArgs {
@@ -180,6 +262,12 @@ fn print(text: &str) -> Result<(), Error> {
     }
 }
 
+/// Says on stderr what a run passed over, so a quiet answer is never mistaken for a complete one.
+/// A reader that went away is no reason to fail.
+fn note(message: &str) {
+    let _ = writeln!(io::stderr().lock(), "nodes: {message}");
+}
+
 /// Runs one command; the exit code is `1` for a failed `check`, `0` otherwise.
 pub fn run(cli: Cli) -> Result<ExitCode, Error> {
     let output = Output { json: cli.json };
@@ -195,12 +283,16 @@ pub fn run(cli: Cli) -> Result<ExitCode, Error> {
             node_type,
             categories,
         } => classify(&repo, &path, node_type, &categories, output),
+        Command::Migrate => migrate(&repo, output),
         Command::Tree(selection) => tree(&repo, &selection, output),
         Command::Ls(selection) => ls(&repo, &selection, output),
         Command::Chain { path } => chain(&repo, &path, output),
         Command::Get { path, field } => get(&repo, &path, field, output),
         Command::Refs { page } => refs(&repo, page, output),
         Command::Find { term } => find(&repo, &term, output),
+        Command::Grep { term, limit } => grep(&repo, &term, limit, output),
+        Command::Recent { path, limit } => recent(&repo, path.as_deref(), limit, output),
+        Command::Resolve { query, limit } => resolve(&repo, &query, limit, output),
         Command::Fmt { files } => fmt(&repo, &files, output),
         Command::Check(args) => check(&repo, args, output),
         Command::Set { path, field, value } => set(&repo, &path, field, &value, output),
@@ -304,7 +396,7 @@ fn subtree_json(
         .filter(|child| pruned.draws(&child.location))
         .map(|child| subtree_json(tree, pruned, selection, child))
         .collect();
-    let mut entry = json!({ "path": node.location, "mount": node.is_mount, "type": node.node.node_type, "categories": node.node.categories, "short": node.node.short, "is": node.node.is, "children": children });
+    let mut entry = json!({ "path": node.location, "mount": node.is_mount, "type": node.node.node_type, "tags": node.node.tags, "short": node.node.short, "is": node.node.is, "children": children });
     if !selection.is_everything() {
         entry["match"] = json!(pruned.matches(&node.location));
     }
@@ -317,14 +409,14 @@ fn ls(repo: &Repo, selection: &Selection, output: Output) -> Result<ExitCode, Er
         .iter()
         .filter(|node| selection.admits(&node.node))
         .collect();
-    if let Some(category) = selection.category {
+    if let Some(category) = selection.ranking_category() {
         // A stable sort: nodes the category fits equally well keep their tree order.
-        listed.sort_by_key(|node| node.node.categories.rank_of(category));
+        listed.sort_by_key(|node| node.node.tags.rank_of(category));
     }
     let value: Vec<Value> = listed
         .iter()
         .map(|node| {
-            json!({ "path": node.location, "mount": node.is_mount, "type": node.node.node_type, "categories": node.node.categories, "charted": node.node.charted, "short": node.node.short, "is": node.node.is })
+            json!({ "path": node.location, "mount": node.is_mount, "type": node.node.node_type, "tags": node.node.tags, "charted": node.node.charted, "short": node.node.short, "is": node.node.is })
         })
         .collect();
     output.emit(&value, &render::ls_text(&listed))
@@ -409,8 +501,8 @@ fn hits_in(node: &LoadedNode, needle: &str) -> Vec<Hit> {
     consider("short".to_owned(), &node.node.short);
     consider("is".to_owned(), &node.node.is);
     consider("type".to_owned(), node.node.node_type.word());
-    for (rank, category) in node.node.categories.ranked().iter().enumerate() {
-        consider(format!("categories[{rank}]"), category.word());
+    for (index, tag) in node.node.tags.authored().iter().enumerate() {
+        consider(format!("tags[{index}]"), tag.as_str());
     }
     for entry in &node.node.fs {
         consider(format!("fs[{}].role", entry.name), &entry.role);
@@ -431,7 +523,255 @@ fn hits_in(node: &LoadedNode, needle: &str) -> Vec<Hit> {
     hits
 }
 
-/// One file `fmt` visited.
+/// The directory a walk over content starts at: the root, or a typed path that is a directory.
+fn content_start(repo: &Repo, input: Option<&str>) -> Result<PathBuf, Error> {
+    let Some(input) = input else {
+        return Ok(repo.root().to_path_buf());
+    };
+    let dir = repo.node_path(input)?.to_dir(repo.root());
+    if !dir.is_dir() {
+        let not_a_directory = Error::InvalidPath {
+            input: input.to_owned(),
+            reason: "not a directory".to_owned(),
+        };
+        return Err(not_a_directory);
+    }
+    Ok(dir)
+}
+
+/// The content at or beneath a typed path. A directory no walk reaches is refused: listing
+/// nothing under an ignored path would read as "nothing there".
+fn content_beneath(repo: &Repo, input: Option<&str>) -> Result<Content, Error> {
+    let start = content_start(repo, input)?;
+    let content = repo.content_across_mounts(&start)?;
+    if !content.reached {
+        let never_reached = Error::InvalidPath {
+            input: input.unwrap_or(".").to_owned(),
+            reason: "ignored: the walk never reaches it".to_owned(),
+        };
+        return Err(never_reached);
+    }
+    Ok(content)
+}
+
+/// A content file as output names it: relative to the root. `None` — and a note — for a name that
+/// is not UTF-8: a lossy name is a path the caller cannot open.
+fn content_name<'a>(repo: &Repo, file: &'a Path) -> Option<&'a str> {
+    let relative = file.strip_prefix(repo.root()).unwrap_or(file);
+    let name = relative.to_str();
+    if name.is_none() {
+        note(&format!(
+            "passed over {}: its name is not UTF-8",
+            relative.display()
+        ));
+    }
+    name
+}
+
+/// The node that owns a content file: the deepest one above it.
+fn owner_of(repo: &Repo, content: &Content, file: &Path) -> Result<NodePath, Error> {
+    let owner_dir = content
+        .owner_of(file)
+        .ok_or_else(|| Error::UnknownNode(NodePath::root()))?;
+    repo.location_of(owner_dir)
+}
+
+/// One line of a file that holds the term `grep` looked for.
+#[derive(Debug, Serialize)]
+struct GrepHit {
+    /// The node that owns the file.
+    path: NodePath,
+    file: String,
+    line: usize,
+    text: String,
+}
+
+fn grep(
+    repo: &Repo,
+    needle: &Needle,
+    limit: Option<Limit>,
+    output: Output,
+) -> Result<ExitCode, Error> {
+    let content = content_beneath(repo, None)?;
+    let wanted = limit.map_or(usize::MAX, Limit::get);
+    let mut hits: Vec<GrepHit> = Vec::new();
+    for file in &content.files {
+        if hits.len() >= wanted {
+            break;
+        }
+        let Some(name) = content_name(repo, file) else {
+            continue;
+        };
+        let lines = match grep::search_file(file, needle) {
+            Ok(Searched::Text(lines)) => lines,
+            Ok(Searched::Binary) => continue,
+            Ok(Searched::TooLarge(bytes)) => {
+                note(&format!(
+                    "passed over {name}: {bytes} bytes, more than grep reads ({})",
+                    grep::MAX_SEARCHED_BYTES
+                ));
+                continue;
+            }
+            Err(source) => {
+                note(&format!("passed over {name}: {source}"));
+                continue;
+            }
+        };
+        if lines.is_empty() {
+            continue;
+        }
+        let path = owner_of(repo, &content, file)?;
+        let room = wanted - hits.len();
+        let found = lines.into_iter().take(room).map(|hit| GrepHit {
+            path: path.clone(),
+            file: name.to_owned(),
+            line: hit.line,
+            text: hit.text,
+        });
+        hits.extend(found);
+    }
+    let text: String = hits
+        .iter()
+        .map(|hit| format!("{}  {}:{}: {}\n", hit.path, hit.file, hit.line, hit.text))
+        .collect();
+    output.emit(&hits, &text)
+}
+
+/// One recently modified file.
+#[derive(Debug, Serialize)]
+struct RecentFile {
+    /// The node that owns the file.
+    path: NodePath,
+    file: String,
+    modified: ModifiedTime,
+}
+
+fn recent(
+    repo: &Repo,
+    input: Option<&str>,
+    limit: Limit,
+    output: Output,
+) -> Result<ExitCode, Error> {
+    let content = content_beneath(repo, input)?;
+    let mut dated: Vec<(ModifiedTime, &str, &Path)> = Vec::new();
+    for file in &content.files {
+        let Some(name) = content_name(repo, file) else {
+            continue;
+        };
+        let modified = std::fs::metadata(file)
+            .and_then(|metadata| metadata.modified())
+            .map_err(|source| source.to_string())
+            .and_then(|time| ModifiedTime::try_from(time).map_err(|range| range.to_string()));
+        match modified {
+            Ok(modified) => dated.push((modified, name, file)),
+            Err(reason) => note(&format!("passed over {name}: {reason}")),
+        }
+    }
+    // Newest first; files modified in the same second list by name.
+    dated.sort_by(|(left_time, left_name, _), (right_time, right_name, _)| {
+        right_time
+            .cmp(left_time)
+            .then_with(|| left_name.cmp(right_name))
+    });
+    dated.truncate(limit.get());
+    let listed: Vec<RecentFile> = dated
+        .into_iter()
+        .map(|(modified, name, file)| {
+            let path = owner_of(repo, &content, file)?;
+            let recent_file = RecentFile {
+                path,
+                file: name.to_owned(),
+                modified,
+            };
+            Ok(recent_file)
+        })
+        .collect::<Result<_, Error>>()?;
+    let text: String = listed
+        .iter()
+        .map(|entry| format!("{}  {}\n", entry.modified, entry.file))
+        .collect();
+    output.emit(&listed, &text)
+}
+
+/// What a resolved path is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum CandidateKind {
+    Node,
+    File,
+}
+
+/// A path `resolve` may mean.
+#[derive(Debug)]
+struct Candidate {
+    path: String,
+    kind: CandidateKind,
+}
+
+impl AsRef<str> for Candidate {
+    fn as_ref(&self) -> &str {
+        &self.path
+    }
+}
+
+/// One path a query most likely means.
+#[derive(Debug, Serialize)]
+struct Resolved {
+    path: String,
+    kind: CandidateKind,
+    score: Score,
+}
+
+fn resolve(repo: &Repo, query: &str, limit: Limit, output: Output) -> Result<ExitCode, Error> {
+    if query.trim_matches('/').is_empty() {
+        let nothing_to_resolve = Error::InvalidArgument {
+            what: "query",
+            input: query.to_owned(),
+            reason: "nothing to resolve".to_owned(),
+        };
+        return Err(nothing_to_resolve);
+    }
+    let content = content_beneath(repo, None)?;
+    let mut candidates: Vec<Candidate> = Vec::new();
+    for node_dir in content.node_dirs() {
+        let location = repo.location_of(node_dir)?;
+        candidates.push(Candidate {
+            path: location.to_string(),
+            kind: CandidateKind::Node,
+        });
+    }
+    for file in &content.files {
+        let Some(name) = content_name(repo, file) else {
+            continue;
+        };
+        candidates.push(Candidate {
+            path: name.to_owned(),
+            kind: CandidateKind::File,
+        });
+    }
+    let resolved: Vec<Resolved> = fuzzy::rank(query, candidates)
+        .into_iter()
+        .take(limit.get())
+        .map(|(candidate, score)| Resolved {
+            path: candidate.path,
+            kind: candidate.kind,
+            score,
+        })
+        .collect();
+    let text: String = resolved
+        .iter()
+        .map(|entry| {
+            let marker = match entry.kind {
+                CandidateKind::Node => render::NODE_MARKER,
+                CandidateKind::File => "",
+            };
+            format!("{}{marker}\n", entry.path)
+        })
+        .collect();
+    output.emit(&resolved, &text)
+}
+
+/// One file `fmt` or `migrate` visited.
 #[derive(Debug, Serialize)]
 struct Formatted {
     file: String,
@@ -585,14 +925,7 @@ fn vocabulary(output: Output) -> Result<ExitCode, Error> {
             meaning: node_type.meaning(),
         })
         .collect();
-    let categories: Vec<Term> = Category::ALL
-        .iter()
-        .map(|category| Term {
-            term: category.word(),
-            meaning: category.meaning(),
-        })
-        .collect();
-    let value = json!({ "type": types, "categories": categories });
+    let value = json!({ "type": types });
     output.emit(&value, &render::vocabulary_text())
 }
 
@@ -600,7 +933,7 @@ fn classify(
     repo: &Repo,
     input: &str,
     node_type: NodeType,
-    categories: &[Category],
+    categories: &[Tag],
     output: Output,
 ) -> Result<ExitCode, Error> {
     let file = own_node_file(repo, input)?;
@@ -612,6 +945,30 @@ fn classify(
         })?;
     repo.write(&file, &classified)?;
     output.written(&classified)
+}
+
+/// Walks this tree's own node files through the migration door (see [`Node::parse_migrating`]);
+/// a mounted tree is its own to migrate.
+fn migrate(repo: &Repo, output: Output) -> Result<ExitCode, Error> {
+    let mut visited = Vec::new();
+    for file in &repo.node_files()? {
+        let text = std::fs::read_to_string(file).map_err(|source| Error::io(file, source))?;
+        let migrated = Node::parse_migrating(&text).map_err(|source| Error::Schema {
+            file: file.clone(),
+            source,
+        })?;
+        let changed = repo.write(file, &migrated)?;
+        visited.push(Formatted {
+            file: repo.display(file),
+            changed,
+        });
+    }
+    let text: String = visited
+        .iter()
+        .filter(|entry| entry.changed)
+        .map(|entry| format!("migrate: {}\n", entry.file))
+        .collect();
+    output.emit(&visited, &text)
 }
 
 fn touch(

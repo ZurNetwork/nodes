@@ -1,4 +1,5 @@
-//! The `charted` date: a plain `YYYY-MM-DD` calendar day, validated on parse.
+//! Calendar time without a calendar crate: the `charted` date — a plain `YYYY-MM-DD` day,
+//! validated on parse — and the instant a file was last modified.
 
 use std::fmt;
 use std::str::FromStr;
@@ -75,6 +76,76 @@ impl ChartedDate {
     }
 }
 
+/// The instant a file was last modified, to the second. Printed RFC 3339 in UTC
+/// (`2026-09-20T14:03:11Z`) and ordered by time, so a listing sorts by what it prints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(into = "String")]
+pub struct ModifiedTime {
+    seconds_since_epoch: i64,
+}
+
+/// A clock reading outside the years 0001–9999: no calendar day to print it as.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TimeOutOfRange;
+
+impl ModifiedTime {
+    /// 0001-01-01T00:00:00Z.
+    const EARLIEST: i64 = -62_135_596_800;
+    /// 9999-12-31T23:59:59Z.
+    const LATEST: i64 = 253_402_300_799;
+}
+
+impl TryFrom<SystemTime> for ModifiedTime {
+    type Error = TimeOutOfRange;
+
+    /// A file system may hand back any 64-bit reading; only one a calendar can print is kept.
+    /// The fraction of a second is dropped by rounding down, on both sides of the epoch: a
+    /// millisecond before 1970 is 23:59:59, not midnight.
+    fn try_from(time: SystemTime) -> Result<Self, TimeOutOfRange> {
+        let seconds_since_epoch = match time.duration_since(UNIX_EPOCH) {
+            Ok(after) => i64::try_from(after.as_secs()),
+            Err(before) => {
+                let until_epoch = before.duration();
+                let started_second = u64::from(until_epoch.subsec_nanos() > 0);
+                let whole_seconds = until_epoch.as_secs().saturating_add(started_second);
+                i64::try_from(whole_seconds).map(|seconds| -seconds)
+            }
+        }
+        .map_err(|_| TimeOutOfRange)?;
+        if !(Self::EARLIEST..=Self::LATEST).contains(&seconds_since_epoch) {
+            return Err(TimeOutOfRange);
+        }
+        Ok(Self {
+            seconds_since_epoch,
+        })
+    }
+}
+
+impl From<ModifiedTime> for String {
+    fn from(time: ModifiedTime) -> Self {
+        time.to_string()
+    }
+}
+
+impl fmt::Display for ModifiedTime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let day = ChartedDate::from_days_since_epoch(self.seconds_since_epoch.div_euclid(86_400));
+        let second_of_day = self.seconds_since_epoch.rem_euclid(86_400);
+        let hour = second_of_day / 3_600;
+        let minute = second_of_day % 3_600 / 60;
+        let second = second_of_day % 60;
+        write!(f, "{day}T{hour:02}:{minute:02}:{second:02}Z")
+    }
+}
+
+impl fmt::Display for TimeOutOfRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "a time outside the years 0001–9999")
+    }
+}
+
+impl std::error::Error for TimeOutOfRange {}
+
 fn days_in_month(year: u16, month: u8) -> u8 {
     let leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
     match month {
@@ -150,6 +221,8 @@ impl std::error::Error for DateError {}
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -178,5 +251,44 @@ mod tests {
         assert_eq!(leap_day_2000.to_string(), "2000-02-29");
         let september_2026 = ChartedDate::from_days_since_epoch(20_709);
         assert_eq!(september_2026.to_string(), "2026-09-13");
+    }
+
+    #[test]
+    fn a_modified_time_prints_rfc_3339_in_utc_and_refuses_what_no_calendar_holds() {
+        let printed = |time: SystemTime| ModifiedTime::try_from(time).map(|time| time.to_string());
+        let after = |seconds: u64| UNIX_EPOCH + Duration::from_secs(seconds);
+        assert_eq!(printed(after(0)), Ok("1970-01-01T00:00:00Z".to_owned()));
+        assert_eq!(
+            printed(after(1_789_912_991)),
+            Ok("2026-09-20T14:03:11Z".to_owned())
+        );
+        assert_eq!(
+            printed(after(951_868_799)),
+            Ok("2000-02-29T23:59:59Z".to_owned())
+        );
+        let a_second_before = UNIX_EPOCH - Duration::from_secs(1);
+        assert_eq!(
+            printed(a_second_before),
+            Ok("1969-12-31T23:59:59Z".to_owned())
+        );
+        let a_millisecond_before = UNIX_EPOCH - Duration::from_millis(1);
+        assert_eq!(
+            printed(a_millisecond_before),
+            Ok("1969-12-31T23:59:59Z".to_owned()),
+            "a fraction rounds down before the epoch too, never towards it"
+        );
+        let almost_two_seconds_after = UNIX_EPOCH + Duration::from_millis(1_999);
+        assert_eq!(
+            printed(almost_two_seconds_after),
+            Ok("1970-01-01T00:00:01Z".to_owned())
+        );
+        assert_eq!(
+            printed(after(253_402_300_799)),
+            Ok("9999-12-31T23:59:59Z".to_owned())
+        );
+        assert_eq!(printed(after(253_402_300_800)), Err(TimeOutOfRange));
+        let earlier = ModifiedTime::try_from(after(10)).expect("in range");
+        let later = ModifiedTime::try_from(after(11)).expect("in range");
+        assert!(earlier < later, "ordered by time");
     }
 }

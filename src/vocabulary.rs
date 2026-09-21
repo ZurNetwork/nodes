@@ -1,5 +1,6 @@
-//! The closed vocabularies a node is classified with: its one [`NodeType`] and its ranked
-//! [`Categories`]. A term outside a vocabulary is a schema error; a new term is a new release.
+//! The closed vocabulary a node is classified with: its one [`NodeType`]. A term outside the
+//! vocabulary is a schema error; a new term is a new release. (What a directory specifically
+//! holds is free-form: the `category:` tags of [`crate::tag`].)
 
 use std::fmt;
 use std::str::FromStr;
@@ -97,36 +98,6 @@ closed_vocabulary! {
     }
 }
 
-closed_vocabulary! {
-    /// What a directory specifically holds. A node ranks the categories that fit it, best first;
-    /// any category may sit under any [`NodeType`].
-    pub enum Category, a "category" among the "categories" {
-        Project => "project", "the root of a whole software project";
-        Source => "source", "hand-written program code";
-        Ui => "ui", "user-interface code";
-        Schema => "schema", "interface definitions: protobuf, lexicons, file formats";
-        Tests => "tests", "suites, harnesses, fixtures, fakes";
-        Generated => "generated", "machine-written output, never edited by hand";
-        Tooling => "tooling", "scripts, code generators, macros, CI";
-        Infrastructure => "infrastructure", "services a project runs on: proxies, containers";
-        Config => "config", "configuration and environment";
-        Docs => "docs", "documentation and pointers";
-        Design => "design", "decisions and deliberation";
-        Identity => "identity", "IDs and civil records";
-        Education => "education", "diplomas, courses, admissions";
-        Finance => "finance", "invoices, receipts, taxes, banking";
-        Housing => "housing", "homes, leases, utilities";
-        Work => "work", "employers, companies, CVs";
-        Health => "health", "medical records";
-        Legal => "legal", "contracts and legal papers";
-        Art => "art", "artwork";
-        Media => "media", "music, pictures, video";
-        Inbox => "inbox", "unsorted intake";
-        Archive => "archive", "no longer current, kept";
-        Index => "index", "catalogs and manifests over other content";
-    }
-}
-
 /// A word that is not a term of the vocabulary it was offered to.
 #[derive(Debug, PartialEq, Eq)]
 pub struct UnknownTerm {
@@ -148,67 +119,6 @@ impl fmt::Display for UnknownTerm {
 
 impl std::error::Error for UnknownTerm {}
 
-/// A node's categories, ranked from most to least fitting: at least one, none twice. The order is
-/// the author's and `fmt` never sorts it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "Vec<Category>", into = "Vec<Category>")]
-pub struct Categories(Vec<Category>);
-
-/// Why a list of categories is not a ranking.
-#[derive(Debug, PartialEq, Eq)]
-pub enum CategoriesError {
-    Empty,
-    Repeated(Category),
-}
-
-impl Categories {
-    /// The categories, best fit first.
-    pub fn ranked(&self) -> &[Category] {
-        &self.0
-    }
-
-    /// How well `category` fits: `0` for the best fit, `None` when the node does not carry it.
-    pub fn rank_of(&self, category: Category) -> Option<usize> {
-        self.0.iter().position(|ranked| *ranked == category)
-    }
-}
-
-impl TryFrom<Vec<Category>> for Categories {
-    type Error = CategoriesError;
-
-    fn try_from(ranked: Vec<Category>) -> Result<Self, CategoriesError> {
-        if ranked.is_empty() {
-            return Err(CategoriesError::Empty);
-        }
-        let repeated = ranked
-            .iter()
-            .enumerate()
-            .find(|(rank, category)| ranked[..*rank].contains(category))
-            .map(|(_, category)| *category);
-        if let Some(category) = repeated {
-            return Err(CategoriesError::Repeated(category));
-        }
-        Ok(Self(ranked))
-    }
-}
-
-impl From<Categories> for Vec<Category> {
-    fn from(categories: Categories) -> Self {
-        categories.0
-    }
-}
-
-impl fmt::Display for CategoriesError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => write!(f, "a node carries at least one category"),
-            Self::Repeated(category) => write!(f, "`{category}` is ranked more than once"),
-        }
-    }
-}
-
-impl std::error::Error for CategoriesError {}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -219,16 +129,13 @@ mod tests {
     fn every_term_is_spelled_once_and_carries_a_meaning() {
         let type_words: BTreeSet<&str> = NodeType::ALL.iter().map(|term| term.word()).collect();
         assert_eq!(type_words.len(), NodeType::ALL.len());
-        let category_words: BTreeSet<&str> = Category::ALL.iter().map(|term| term.word()).collect();
-        assert_eq!(category_words.len(), Category::ALL.len());
         assert!(NodeType::ALL.iter().all(|term| !term.meaning().is_empty()));
-        assert!(Category::ALL.iter().all(|term| !term.meaning().is_empty()));
     }
 
     #[test]
     fn a_term_round_trips_through_its_word() {
-        for category in Category::ALL {
-            assert_eq!(category.word().parse::<Category>(), Ok(*category));
+        for node_type in NodeType::ALL {
+            assert_eq!(node_type.word().parse::<NodeType>(), Ok(*node_type));
         }
         let unknown = "paperwork".parse::<NodeType>().expect_err("closed");
         assert_eq!(

@@ -8,10 +8,14 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 pub use crate::date::ChartedDate;
-pub use crate::vocabulary::{Categories, Category, NodeType};
+pub use crate::tag::{Tag, Tags};
+pub use crate::vocabulary::NodeType;
 
 /// The file name every node lives in.
 pub const NODE_FILE: &str = "NODE.json";
+
+/// The key a node file ranked its categories under before `tags` existed (up to v0.5).
+const LEGACY_CATEGORIES_KEY: &str = "categories";
 
 /// One directory's chart: what it is, its rules, its named children and the design pages that govern it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,8 +32,9 @@ pub struct Node {
     /// What the directory broadly holds: the one kind that fits best.
     #[serde(rename = "type")]
     pub node_type: NodeType,
-    /// What it specifically holds, ranked from most to least fitting; author order.
-    pub categories: Categories,
+    /// Free-form labels, `word` or `namespace:word`; the `category:` ones say what it specifically
+    /// holds, ranked from most to least fitting. Author order.
+    pub tags: Tags,
     /// One rule per entry, terse; author order.
     pub conventions: Vec<String>,
     /// Files to read first, relative to this directory; author order.
@@ -67,20 +72,52 @@ impl Node {
         serde_json::from_str(text)
     }
 
+    /// Parses a node file written before `tags` existed: its ranked `categories` become
+    /// `category:` tags, in the same order. The one door for such a file — `nodes migrate` walks a
+    /// tree through it; a file that already carries `tags` parses as usual, so `categories` left
+    /// beside them are refused rather than silently dropped.
+    pub fn parse_migrating(text: &str) -> Result<Self, serde_json::Error> {
+        let mut whole: serde_json::Value = serde_json::from_str(text)?;
+        if let Some(fields) = whole.as_object_mut() {
+            let tags_key = Field::Tags.key();
+            let carries_tags = fields.contains_key(tags_key);
+            let legacy_categories = (!carries_tags)
+                .then(|| fields.remove(LEGACY_CATEGORIES_KEY))
+                .flatten();
+            if let Some(categories) = legacy_categories {
+                fields.insert(tags_key.to_owned(), category_tags(categories));
+            }
+        }
+        serde_json::from_value(whole)
+    }
+
     /// Parses a node file whose classification the caller supplies, replacing whatever the file
-    /// says: the one door for a file written before `type` and `categories` existed. Everything
-    /// else must fit the schema as usual.
+    /// says: its `type`, and its `category:` tags — the given ones lead, the file's other tags
+    /// follow. The one door for a file written before `type` existed. Everything else must fit
+    /// the schema as usual.
     pub fn parse_classified(
         text: &str,
         node_type: NodeType,
-        categories: &[Category],
+        categories: &[Tag],
     ) -> Result<Self, serde_json::Error> {
         let mut whole: serde_json::Value = serde_json::from_str(text)?;
         if let Some(fields) = whole.as_object_mut() {
+            fields.remove(LEGACY_CATEGORIES_KEY);
             let type_key = Field::Type.key().to_owned();
-            let categories_key = Field::Categories.key().to_owned();
+            let tags_key = Field::Tags.key().to_owned();
+            let other_tags: Vec<serde_json::Value> = fields
+                .get(&tags_key)
+                .and_then(serde_json::Value::as_array)
+                .map(|tags| tags.iter().filter(|tag| !is_category_tag(tag)).cloned())
+                .map(Iterator::collect)
+                .unwrap_or_default();
+            let mut tags: Vec<serde_json::Value> = categories
+                .iter()
+                .map(|category| serde_json::json!(category))
+                .collect();
+            tags.extend(other_tags);
             fields.insert(type_key, serde_json::json!(node_type));
-            fields.insert(categories_key, serde_json::json!(categories));
+            fields.insert(tags_key, serde_json::Value::Array(tags));
         }
         serde_json::from_value(whole)
     }
@@ -123,6 +160,29 @@ impl Node {
     }
 }
 
+/// A legacy `categories` value as the `tags` it becomes: each word behind the `category:`
+/// namespace. Whatever is not a list of words is passed on as it is, for the schema to refuse.
+fn category_tags(categories: serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Array(words) = categories else {
+        return categories;
+    };
+    let tags = words
+        .into_iter()
+        .map(|word| match word.as_str() {
+            Some(word) => serde_json::json!(format!("{}:{word}", crate::tag::CATEGORY_NAMESPACE)),
+            None => word,
+        })
+        .collect();
+    serde_json::Value::Array(tags)
+}
+
+/// Whether a raw `tags` entry sits in the `category` namespace.
+fn is_category_tag(tag: &serde_json::Value) -> bool {
+    tag.as_str()
+        .and_then(|text| text.split_once(':'))
+        .is_some_and(|(namespace, _)| namespace == crate::tag::CATEGORY_NAMESPACE)
+}
+
 /// The fields of a node, as `get` and `set` name them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
@@ -131,7 +191,7 @@ pub enum Field {
     Short,
     Is,
     Type,
-    Categories,
+    Tags,
     Conventions,
     EntryPoints,
     Fs,
@@ -147,7 +207,7 @@ impl Field {
         Self::Short,
         Self::Is,
         Self::Type,
-        Self::Categories,
+        Self::Tags,
         Self::Conventions,
         Self::EntryPoints,
         Self::Fs,
@@ -163,7 +223,7 @@ impl Field {
             Self::Short => "short",
             Self::Is => "is",
             Self::Type => "type",
-            Self::Categories => "categories",
+            Self::Tags => "tags",
             Self::Conventions => "conventions",
             Self::EntryPoints => "entry_points",
             Self::Fs => "fs",
@@ -483,7 +543,7 @@ mod tests {
   "short": "The crates",
   "is": "Twelve crates.",
   "type": "code",
-  "categories": ["source", "tests"],
+  "tags": ["category:source", "wip", "category:tests"],
   "conventions": ["b second", "a first"],
   "entry_points": ["src/lib.rs"],
   "fs": [
@@ -518,38 +578,96 @@ mod tests {
     }
 
     #[test]
-    fn categories_keep_their_ranking_and_refuse_what_the_vocabulary_lacks() {
-        let ranked = sample().replacen(r#"["source", "tests"]"#, r#"["tests", "source"]"#, 1);
-        let node = Node::parse(&ranked).expect("valid").canonical();
-        let expected_ranking = [Category::Tests, Category::Source];
-        assert_eq!(node.categories.ranked(), expected_ranking);
-        assert_eq!(node.categories.rank_of(Category::Source), Some(1));
-        assert_eq!(node.categories.rank_of(Category::Finance), None);
+    fn tags_keep_their_order_and_the_type_stays_closed() {
+        let node = Node::parse(sample()).expect("valid").canonical();
+        let authored: Vec<&str> = node.tags.authored().iter().map(Tag::as_str).collect();
+        assert_eq!(
+            authored,
+            ["category:source", "wip", "category:tests"],
+            "as authored, never sorted"
+        );
+        let tests = Tag::category("tests").expect("well-formed");
+        let finance = Tag::category("finance").expect("well-formed");
+        assert_eq!(node.tags.rank_of(&tests), Some(1));
+        assert_eq!(node.tags.rank_of(&finance), None);
         assert_eq!(node.node_type, NodeType::Code);
-        let unknown_category = sample().replacen(r#""tests"]"#, r#""nonsense"]"#, 1);
-        let unknown_category_error = Node::parse(&unknown_category).expect_err("closed");
+        let free_form = sample().replacen(r#""wip""#, r#""artist:starsie""#, 1);
         assert!(
-            unknown_category_error
+            Node::parse(&free_form).is_ok(),
+            "no vocabulary closes the tags"
+        );
+        let malformed = sample().replacen(r#""wip""#, r#""Code Source""#, 1);
+        let malformed_error = Node::parse(&malformed).expect_err("not a tag");
+        assert!(
+            malformed_error
                 .to_string()
-                .contains("unknown category `nonsense`; the categories are project, source,")
+                .contains("`Code Source` is not a tag: a tag is `word` or `namespace:word`")
         );
         let unknown_type = sample().replacen(r#""type": "code""#, r#""type": "paperwork""#, 1);
         let unknown_type_error = Node::parse(&unknown_type).expect_err("closed");
         assert!(unknown_type_error.to_string().contains(
             "unknown type `paperwork`; the types are code, document, art, media, data, software"
         ));
-        let empty = sample().replacen(r#"["source", "tests"]"#, "[]", 1);
-        let empty_error = Node::parse(&empty).expect_err("at least one");
-        assert!(empty_error.to_string().contains("at least one category"));
-        let repeated = sample().replacen(r#""tests"]"#, r#""source"]"#, 1);
-        let repeated_error = Node::parse(&repeated).expect_err("ranked once");
+        let no_category = sample().replacen(
+            r#"["category:source", "wip", "category:tests"]"#,
+            r#"["wip"]"#,
+            1,
+        );
+        let no_category_error = Node::parse(&no_category).expect_err("at least one");
+        assert!(
+            no_category_error
+                .to_string()
+                .contains("at least one `category:` tag")
+        );
+        let repeated = sample().replacen(r#""category:tests"]"#, r#""wip"]"#, 1);
+        let repeated_error = Node::parse(&repeated).expect_err("tagged once");
         assert!(
             repeated_error
                 .to_string()
-                .contains("`source` is ranked more than once")
+                .contains("`wip` is tagged more than once")
         );
-        assert_eq!("ui".parse::<Category>(), Ok(Category::Ui));
-        assert_eq!(Category::Infrastructure.to_string(), "infrastructure");
+    }
+
+    #[test]
+    fn a_file_with_ranked_categories_is_migrated_and_refused_everywhere_else() {
+        let legacy = sample().replacen(
+            r#""tags": ["category:source", "wip", "category:tests"]"#,
+            r#""categories": ["tests", "source"]"#,
+            1,
+        );
+        let refused = Node::parse(&legacy).expect_err("the schema has no `categories`");
+        assert!(refused.to_string().contains("unknown field `categories`"));
+        let migrated = Node::parse_migrating(&legacy).expect("migrated");
+        let authored: Vec<&str> = migrated.tags.authored().iter().map(Tag::as_str).collect();
+        assert_eq!(
+            authored,
+            ["category:tests", "category:source"],
+            "the ranking carries over"
+        );
+        let current = Node::parse(sample()).expect("valid");
+        assert_eq!(
+            Node::parse_migrating(sample()).expect("already migrated"),
+            current,
+            "a file that carries `tags` is left as it is"
+        );
+        let both = sample().replacen(r#""notes": []"#, r#""notes": [], "categories": ["ui"]"#, 1);
+        let both_error = Node::parse_migrating(&both).expect_err("which one is meant?");
+        assert!(
+            both_error
+                .to_string()
+                .contains("unknown field `categories`"),
+            "`categories` left beside `tags` are refused, never silently dropped"
+        );
+    }
+
+    #[test]
+    fn classifying_replaces_the_categories_and_keeps_the_other_tags() {
+        let ui = Tag::category("ui").expect("well-formed");
+        let classified =
+            Node::parse_classified(sample(), NodeType::Document, &[ui]).expect("classified");
+        let authored: Vec<&str> = classified.tags.authored().iter().map(Tag::as_str).collect();
+        assert_eq!(authored, ["category:ui", "wip"]);
+        assert_eq!(classified.node_type, NodeType::Document);
     }
 
     #[test]
