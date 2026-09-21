@@ -3,6 +3,12 @@
   "charted": "2026-09-21",
   "short": "The NODE.json normalizer and lookup CLI",
   "is": "nodes — the NODE.json normalizer and lookup CLI: a small Rust program that formats, validates and queries a repository's per-directory NODE.json chart files (Zurfur is the first consumer).",
+  "type": "code",
+  "categories": [
+    "project",
+    "tooling",
+    "source"
+  ],
   "conventions": [
     "Rust edition 2024; dependencies are serde, serde_json, clap (derive) and ignore (its gitignore matcher) — nothing else unless it earns its place.",
     "The schema IS the serde structs (deny_unknown_fields); `nodes fmt` is parse → serialize and must be idempotent.",
@@ -48,12 +54,12 @@
     },
     {
       "name": "README.md",
-      "role": "the schema, the command table, mounts, ignore files, canonical form, check rules, install",
+      "role": "the schema, the vocabularies, the command table, mounts, ignore files, canonical form, check rules, install",
       "node": false
     },
     {
       "name": "src/",
-      "role": "the CLI: schema.rs (the structs + newtypes), date.rs, ignores.rs (gitignore rules for the walk), repo.rs (discovery, the walk, mounts, read/write), tree.rs, refindex.rs, check.rs, render.rs, cli.rs",
+      "role": "the CLI: schema.rs (the structs + newtypes), vocabulary.rs (the closed type and category vocabularies), date.rs, ignores.rs (gitignore rules for the walk), repo.rs (discovery, the walk, mounts, read/write), tree.rs, refindex.rs, check.rs, render.rs, cli.rs",
       "node": false
     },
     {

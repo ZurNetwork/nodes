@@ -12,6 +12,8 @@ Every `NODE.json` has exactly these fields, in this order; unknown keys are refu
   "charted": "2026-09-12",
   "short": "A few words, for listings",
   "is": "One sentence: what this directory IS.",
+  "type": "code",
+  "categories": ["source", "tests"],
   "conventions": ["one rule per entry"],
   "entry_points": ["src/lib.rs"],
   "fs": [{ "name": "api/", "role": "the HTTP driver", "node": true }],
@@ -20,18 +22,51 @@ Every `NODE.json` has exactly these fields, in this order; unknown keys are refu
 }
 ```
 
-`path` is the repo-relative directory (`.` for the root). `short` is what `tree` and `ls` print — a noun phrase, no period; `is` is the full sentence. `fs` lists the direct children worth naming; `node: true` means the child carries its own `NODE.json`. `refs` is the only place code points at design: a page id, its title, and what it governs here.
+`path` is the repo-relative directory (`.` for the root). `short` is what `tree` and `ls` print — a noun phrase, no period; `is` is the full sentence. `type` and `categories` classify the directory from two closed vocabularies (below). `fs` lists the direct children worth naming; `node: true` means the child carries its own `NODE.json`. `refs` is the only place code points at design: a page id, its title, and what it governs here.
+
+## Type and categories
+
+Both vocabularies are closed: a word outside them is a schema error, and a new term is a new release. They live in one table each, in `src/vocabulary.rs`.
+
+- `type` — what the directory broadly holds, the one kind that fits best: `code`, `document`, `art`, `media`, `data`, `software` (installed applications, games, servers — not their source).
+- `categories` — what it specifically holds, ranked from most to least fitting: at least one, none twice, author order (`fmt` never sorts it). Any category may sit under any type.
+
+| Category | Means |
+|---|---|
+| `project` | the root of a whole software project |
+| `source` | hand-written program code |
+| `ui` | user-interface code |
+| `schema` | interface definitions: protobuf, lexicons, file formats |
+| `tests` | suites, harnesses, fixtures, fakes |
+| `generated` | machine-written output, never edited by hand |
+| `tooling` | scripts, code generators, macros, CI |
+| `infrastructure` | services a project runs on: proxies, containers |
+| `config` | configuration and environment |
+| `docs` | documentation and pointers |
+| `design` | decisions and deliberation |
+| `identity` | IDs and civil records |
+| `education` | diplomas, courses, admissions |
+| `finance` | invoices, receipts, taxes, banking |
+| `housing` | homes, leases, utilities |
+| `work` | employers, companies, CVs |
+| `health` | medical records |
+| `legal` | contracts and legal papers |
+| `art` | artwork |
+| `media` | music, pictures, video |
+| `inbox` | unsorted intake |
+| `archive` | no longer current, kept |
+| `index` | catalogs and manifests over other content |
 
 ## Commands
 
 | Command | Does |
 |---|---|
 | `nodes tree` | the whole tree, drawn: each node's name + `short` |
-| `nodes ls` | every node, one line each: path + `short` |
+| `nodes ls [--type T] [--category C]` | every node, one line each: path + `short`; `--category` lists best fit first |
 | `nodes chain <path>` | root → … → node: what to read to understand a path |
 | `nodes get <path> [field]` | one node, or one field of it |
 | `nodes refs <page>` | every node citing a page |
-| `nodes find <term>` | search `short`, `is`, `fs[].role`, `conventions`, `notes`, `refs[].title/governs` |
+| `nodes find <term>` | search `short`, `is`, `type`, `categories`, `fs[].role`, `conventions`, `notes`, `refs[].title/governs` |
 | `nodes fmt [file…]` | normalize in place (default: every `NODE.json`) |
 | `nodes check [--ref-index FILE]` | validate; exit 1 on any error |
 | `nodes set <path> <field> <json>` | replace one field, then normalize |
@@ -53,7 +88,7 @@ $ nodes tree
         └── api/v1  The v1 proto corpus
 ```
 
-A node beneath a pass-through directory is named by its path from the parent node (`api/v1`). `--json` keeps full paths (`{path, mount, short, is, children}`).
+A node beneath a pass-through directory is named by its path from the parent node (`api/v1`). `--json` keeps full paths (`{path, mount, type, categories, short, is, children}`).
 
 ## Mounts
 
@@ -89,7 +124,7 @@ Patterns are matched against directories; a line git would not understand is pas
 
 ## Check rules
 
-- schema: every file parses, unknown keys are errors, `charted` is a real date;
+- schema: every file parses, unknown keys are errors, `charted` is a real date, `type` and every category come from their vocabularies, and `categories` ranks at least one, none twice;
 - `path` matches where the file sits;
 - every `fs` entry with `node: true` has a `NODE.json` at that path (a nested name like `src/account/` is allowed, so a pass-through directory needs no node of its own) that the walk reaches — a node that is hidden, ignored or inside a mount is an error — and every node or mount directly beneath another node is listed there with `node: true`;
 - a mount's root node fits the schema; nothing else of a mounted tree is checked (see Mounts);

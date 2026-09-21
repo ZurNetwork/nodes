@@ -13,7 +13,9 @@ use crate::error::Error;
 use crate::refindex::DEFAULT_SUPERSEDED_MARKER;
 use crate::render;
 use crate::repo::{LoadedNode, Repo};
-use crate::schema::{ChartedDate, Field, NODE_FILE, Node, NodePath, PageId, Ref};
+use crate::schema::{
+    Category, ChartedDate, Field, NODE_FILE, Node, NodePath, NodeType, PageId, Ref,
+};
 use crate::tree::NodeTree;
 
 /// NODE.json normalizer and lookup.
@@ -36,7 +38,7 @@ pub enum Command {
     /// a mounted tree's root is tagged `[mount]`.
     Tree,
     /// Every node, one line each: path + `short`.
-    Ls,
+    Ls(LsArgs),
     /// Root → … → node: the nodes a reader loads to understand a path.
     Chain {
         /// A repo-relative directory (or a file in it).
@@ -45,12 +47,12 @@ pub enum Command {
     /// One node, or one field of it.
     Get {
         path: String,
-        /// path, charted, short, is, conventions, entry_points, fs, refs or notes.
+        /// path, charted, short, is, type, categories, conventions, entry_points, fs, refs or notes.
         field: Option<Field>,
     },
     /// Every node citing a page.
     Refs { page: PageId },
-    /// Case-insensitive search over `short`, `is`, `fs[].role`, `conventions`, `notes`, `refs[].title` and `refs[].governs`.
+    /// Case-insensitive search over `short`, `is`, `type`, `categories`, `fs[].role`, `conventions`, `notes`, `refs[].title` and `refs[].governs`.
     Find { term: String },
     /// Normalize NODE.json files in place (default: every one in the repository).
     Fmt {
@@ -80,6 +82,16 @@ pub enum Command {
         #[arg(long, value_name = "YYYY-MM-DD")]
         date: Option<ChartedDate>,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct LsArgs {
+    /// Only nodes carrying this category, best fit first (by its rank in each node's list).
+    #[arg(long, value_name = "CATEGORY")]
+    pub category: Option<Category>,
+    /// Only nodes of this type.
+    #[arg(long = "type", value_name = "TYPE")]
+    pub node_type: Option<NodeType>,
 }
 
 #[derive(Debug, Args)]
@@ -145,7 +157,7 @@ pub fn run(cli: Cli) -> Result<ExitCode, Error> {
     let output = Output { json: cli.json };
     match cli.command {
         Command::Tree => tree(&repo, output),
-        Command::Ls => ls(&repo, output),
+        Command::Ls(args) => ls(&repo, &args, output),
         Command::Chain { path } => chain(&repo, &path, output),
         Command::Get { path, field } => get(&repo, &path, field, output),
         Command::Refs { page } => refs(&repo, page, output),
@@ -234,18 +246,32 @@ fn subtree_json(tree: &NodeTree, node: &LoadedNode) -> Value {
         .into_iter()
         .map(|child| subtree_json(tree, child))
         .collect();
-    json!({ "path": node.location, "mount": node.is_mount, "short": node.node.short, "is": node.node.is, "children": children })
+    json!({ "path": node.location, "mount": node.is_mount, "type": node.node.node_type, "categories": node.node.categories, "short": node.node.short, "is": node.node.is, "children": children })
 }
 
-fn ls(repo: &Repo, output: Output) -> Result<ExitCode, Error> {
+fn ls(repo: &Repo, args: &LsArgs, output: Output) -> Result<ExitCode, Error> {
     let tree = load_tree(repo)?;
-    let value: Vec<Value> = tree
+    let mut listed: Vec<&LoadedNode> = tree
         .iter()
-        .map(|node| {
-            json!({ "path": node.location, "mount": node.is_mount, "charted": node.node.charted, "short": node.node.short, "is": node.node.is })
+        .filter(|node| {
+            args.node_type
+                .is_none_or(|node_type| node.node.node_type == node_type)
+        })
+        .filter(|node| {
+            args.category
+                .is_none_or(|category| node.node.categories.rank_of(category).is_some())
         })
         .collect();
-    output.emit(&value, &render::ls_text(&tree))
+    if let Some(category) = args.category {
+        listed.sort_by_key(|node| node.node.categories.rank_of(category));
+    }
+    let value: Vec<Value> = listed
+        .iter()
+        .map(|node| {
+            json!({ "path": node.location, "mount": node.is_mount, "type": node.node.node_type, "categories": node.node.categories, "charted": node.node.charted, "short": node.node.short, "is": node.node.is })
+        })
+        .collect();
+    output.emit(&value, &render::ls_text(&listed))
 }
 
 fn chain(repo: &Repo, input: &str, output: Output) -> Result<ExitCode, Error> {
@@ -326,6 +352,10 @@ fn hits_in(node: &LoadedNode, needle: &str) -> Vec<Hit> {
     };
     consider("short".to_owned(), &node.node.short);
     consider("is".to_owned(), &node.node.is);
+    consider("type".to_owned(), node.node.node_type.word());
+    for (rank, category) in node.node.categories.ranked().iter().enumerate() {
+        consider(format!("categories[{rank}]"), category.word());
+    }
     for entry in &node.node.fs {
         consider(format!("fs[{}].role", entry.name), &entry.role);
     }

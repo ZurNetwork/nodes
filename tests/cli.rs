@@ -200,6 +200,8 @@ fn node(
         "charted": "2026-09-12",
         "short": is.trim_end_matches('.'),
         "is": is,
+        "type": "code",
+        "categories": ["source"],
         "conventions": [],
         "entry_points": [],
         "fs": fs,
@@ -211,12 +213,22 @@ fn node(
         .canonical_json()
 }
 
+/// The same node file, classified otherwise.
+fn classified(text: &str, node_type: &str, categories: &[&str]) -> String {
+    let mut value: Value = serde_json::from_str(text).expect("json");
+    value["type"] = json!(node_type);
+    value["categories"] = json!(categories);
+    nodes::schema::Node::parse(&value.to_string())
+        .expect("a valid node")
+        .canonical_json()
+}
+
 #[test]
 fn fmt_normalizes_once_and_is_then_a_no_op() {
     let repo = TempRepo::charted();
     let messy = r#"{"notes": [], "short": "Messy", "refs": [{"governs": "b", "title": "B", "page": 20}, {"page": 10, "title": "A", "governs": "a"}],
         "fs": [{"name": "z/", "role": "last", "node": false}, {"name": "a/", "role": "first", "node": false}],
-        "entry_points": ["x"], "conventions": ["c"], "is": "Messy.", "charted": "2026-01-02", "path": "backend/crates"}"#;
+        "entry_points": ["x"], "conventions": ["c"], "categories": ["tests", "source"], "type": "code", "is": "Messy.", "charted": "2026-01-02", "path": "backend/crates"}"#;
     repo.write("backend/crates/NODE.json", messy);
     let first = repo.ok(&["fmt"]);
     assert_eq!(first, "fmt: backend/crates/NODE.json\n");
@@ -225,7 +237,7 @@ fn fmt_normalizes_once_and_is_then_a_no_op() {
         .expect("valid")
         .canonical_json();
     assert_eq!(formatted, expected);
-    let canonical_head = "{\n  \"path\": \"backend/crates\",\n  \"charted\": \"2026-01-02\",\n  \"short\": \"Messy\",\n  \"is\": \"Messy.\",\n";
+    let canonical_head = "{\n  \"path\": \"backend/crates\",\n  \"charted\": \"2026-01-02\",\n  \"short\": \"Messy\",\n  \"is\": \"Messy.\",\n  \"type\": \"code\",\n  \"categories\": [\n    \"tests\",\n    \"source\"\n  ],\n";
     assert!(formatted.starts_with(canonical_head), "{formatted}");
     let a_before_z = formatted.find("\"a/\"").expect("a/") < formatted.find("\"z/\"").expect("z/");
     assert!(a_before_z, "fs sorted by name");
@@ -370,7 +382,7 @@ fn get_refs_and_find_look_things_up() {
     let whole = repo.ok(&["get", "."]);
     assert!(
         whole.starts_with(
-            ".  (charted 2026-09-12)\nshort: The whole repository\nis: The whole repository.\nconventions: (none)\n"
+            ".  (charted 2026-09-12)\nshort: The whole repository\nis: The whole repository.\ntype: code\ncategories: source\nconventions: (none)\n"
         ),
         "{whole}"
     );
@@ -656,7 +668,7 @@ fn a_mount_is_listed_by_its_parent_with_node_true() {
 fn writes_and_fmt_never_cross_a_mount() {
     let repo = TempRepo::mounting();
     let messy = r#"{"notes": [], "short": "Messy", "refs": [], "fs": [], "entry_points": [],
-        "conventions": [], "is": "Messy.", "charted": "2026-01-02", "path": "housing"}"#;
+        "conventions": [], "categories": ["housing"], "type": "document", "is": "Messy.", "charted": "2026-01-02", "path": "housing"}"#;
     repo.write("life/housing/NODE.json", messy);
     let refused = [
         vec!["set", "life/housing", "short", "Rewritten"],
@@ -815,4 +827,96 @@ fn an_unreadable_ignore_file_stops_the_run() {
     }
     let (_, stderr) = repo.fails(&["ls"]);
     assert!(stderr.contains("frontend/.chartignore"), "{stderr}");
+}
+
+#[test]
+fn nodes_are_classified_by_type_and_ranked_categories() {
+    let repo = TempRepo::charted();
+    let frontend = classified(&repo.read("frontend/NODE.json"), "code", &["ui", "source"]);
+    repo.write("frontend/NODE.json", &frontend);
+    let crates = classified(
+        &repo.read("backend/crates/NODE.json"),
+        "code",
+        &["source", "tests", "ui"],
+    );
+    repo.write("backend/crates/NODE.json", &crates);
+    let docs = node("docs", "Pointers into the design corpus.", &[], &[], &[]);
+    let docs = classified(&docs, "document", &["docs", "generated"]);
+    repo.write("docs/NODE.json", &docs);
+    let root = classified(&repo.read("NODE.json"), "code", &["project"]).replace(
+        "\"name\": \"docs/\",\n      \"role\": \"pointers\",\n      \"node\": false",
+        "\"name\": \"docs/\",\n      \"role\": \"pointers\",\n      \"node\": true",
+    );
+    repo.write("NODE.json", &root);
+    assert_eq!(repo.ok(&["check"]), "5 nodes, 0 errors, 0 warnings\n");
+    assert_eq!(
+        repo.ok(&["ls", "--category", "ui"]),
+        "frontend  The client tier\nbackend/crates  Twelve crates in a hexagon\n",
+        "best fit first: `ui` leads frontend's list and trails the crates'"
+    );
+    assert_eq!(
+        repo.ok(&["ls", "--type", "document"]),
+        "docs  Pointers into the design corpus\n"
+    );
+    assert_eq!(
+        repo.ok(&["ls", "--type", "code", "--category", "source"]),
+        "backend  The backend\nbackend/crates  Twelve crates in a hexagon\nfrontend  The client tier\n"
+    );
+    assert_eq!(repo.ok(&["ls", "--category", "finance"]), "");
+    let (_, stderr) = repo.fails(&["ls", "--category", "nonsense"]);
+    assert!(stderr.contains("unknown category `nonsense`"), "{stderr}");
+    assert_eq!(repo.ok(&["get", "frontend", "type"]), "code\n");
+    assert_eq!(repo.ok(&["get", "frontend", "categories"]), "ui\nsource\n");
+    let whole = repo.ok(&["get", "frontend"]);
+    assert!(
+        whole.contains("\ntype: code\ncategories: ui, source\n"),
+        "{whole}"
+    );
+    let ls_json: Value = serde_json::from_str(&repo.ok(&["--json", "ls"])).expect("json");
+    assert_eq!(ls_json[4]["path"], "frontend");
+    assert_eq!(ls_json[4]["type"], "code");
+    assert_eq!(ls_json[4]["categories"], json!(["ui", "source"]));
+    let tree_json: Value = serde_json::from_str(&repo.ok(&["--json", "tree"])).expect("json");
+    assert_eq!(tree_json["type"], "code");
+    assert_eq!(tree_json["categories"], json!(["project"]));
+    assert_eq!(
+        repo.ok(&["find", "generated"]),
+        "docs  categories[1]: generated\n"
+    );
+    assert_eq!(repo.ok(&["find", "DOCUMENT"]), "docs  type: document\n");
+}
+
+#[test]
+fn type_and_categories_are_set_from_the_closed_vocabularies() {
+    let repo = TempRepo::charted();
+    repo.ok(&["set", "frontend", "type", "document"]);
+    repo.ok(&["set", "frontend", "categories", r#"["work", "finance"]"#]);
+    assert_eq!(repo.ok(&["get", "frontend", "type"]), "document\n");
+    assert_eq!(
+        repo.ok(&["get", "frontend", "categories"]),
+        "work\nfinance\n",
+        "ranked as authored, never sorted"
+    );
+    assert_eq!(repo.ok(&["fmt"]), "", "set leaves the file canonical");
+    let (_, stderr) = repo.fails(&["set", "frontend", "type", "paperwork"]);
+    assert!(
+        stderr.contains("unknown type `paperwork`; the types are code, document"),
+        "{stderr}"
+    );
+    let (_, stderr) = repo.fails(&["set", "frontend", "categories", r#"["work", "nonsense"]"#]);
+    assert!(stderr.contains("unknown category `nonsense`"), "{stderr}");
+    let (_, stderr) = repo.fails(&["set", "frontend", "categories", "[]"]);
+    assert!(stderr.contains("at least one category"), "{stderr}");
+    let (_, stderr) = repo.fails(&["set", "frontend", "categories", r#"["work", "work"]"#]);
+    assert!(
+        stderr.contains("`work` is ranked more than once"),
+        "{stderr}"
+    );
+    let unclassified = repo
+        .read("backend/NODE.json")
+        .replace("  \"type\": \"code\",\n", "");
+    repo.write("backend/NODE.json", &unclassified);
+    let (stdout, _) = repo.fails(&["check"]);
+    assert!(stdout.contains("error: backend: "), "{stdout}");
+    assert!(stdout.contains("missing field `type`"), "{stdout}");
 }
