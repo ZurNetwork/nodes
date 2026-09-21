@@ -32,7 +32,7 @@ jobs:
           targets: ${{ matrix.target }}
       # A tag can be cut from any commit: prove this one on the very platform it ships to
       # before anything is built. One failing target stops the whole release (`needs: build`).
-      - run: cargo test --locked
+      - run: cargo test --locked --target ${{ matrix.target }}
       - run: cargo build --release --locked --target ${{ matrix.target }}
       # The tag is the version: refuse to publish a binary that reports a different one.
       - run: |
