@@ -53,7 +53,35 @@ $ nodes tree
         └── api/v1  The v1 proto corpus
 ```
 
-A node beneath a pass-through directory is named by its path from the parent node (`api/v1`). `--json` keeps full paths (`{path, is, children}`).
+A node beneath a pass-through directory is named by its path from the parent node (`api/v1`). `--json` keeps full paths (`{path, mount, short, is, children}`).
+
+## Mounts
+
+A directory beneath the root whose own `NODE.json` declares `path: "."` is another tree, **mounted** here — a documents tree and a few repositories under one home-level root, say. A mount is a boundary for writes and validation, and transparent for reads:
+
+- `tree`, `ls`, `find`, `chain`, `get` and `refs` cross into it, mounts within mounts included. Every path printed is relative to the root you asked from, so `nodes --root ~ chain "Life/30 Housing"` runs `.` → `Life` → `Life/30 Housing`. `tree` tags a mounted root `[mount]`; `tree` and `ls` carry `"mount": true|false` with `--json`.
+- `set`, `touch`, `add-ref`, `rm-ref` and `fmt` never cross: a path inside a mount is refused (run the command with `--root <the mount>`), and a bare `fmt` formats this tree's files only.
+- `check` reads only the mount's root node (it must fit the schema) and holds the parent to the usual listing rule — the mount is an `fs` entry with `node: true`. Nothing beneath the mount's root is validated, and its refs are never held against this tree's `--ref-index`.
+- A mounted tree is read exactly as it reads from its own root: its own ignore files govern inside it. To keep a mount out of reads altogether, ignore its directory.
+
+```
+$ nodes --root ~ tree
+.  Home
+├── Life  [mount]  Personal documents
+│   └── 30 Housing  Lease, utilities
+└── code/zurfur  [mount]  The Zurfur monorepo
+    └── backend  The Rust backend (ports and adapters)
+```
+
+## Ignore files
+
+The walk that finds `NODE.json` files stays out of:
+
+- whatever `.chartignore` or `.gitignore` excludes — real gitignore semantics (globs, anchoring such as `/build/` or `a/b/`, `!` negation, last match wins, and a child of an excluded directory cannot be re-included), read at every directory level, a deeper file overriding a shallower one and `.chartignore` overriding the `.gitignore` beside it. Nothing above the root is read;
+- hidden directories (`.name/`), unless a `!.name/` line re-includes them;
+- `.git`, `.jj`, `node_modules` and `target`, always.
+
+Patterns are matched against directories; a line git would not understand is passed over.
 
 ## Canonical form
 
@@ -63,7 +91,8 @@ A node beneath a pass-through directory is named by its path from the parent nod
 
 - schema: every file parses, unknown keys are errors, `charted` is a real date;
 - `path` matches where the file sits;
-- every `fs` entry with `node: true` has a `NODE.json` at that path (a nested name like `src/account/` is allowed, so a pass-through directory needs no node of its own), and every node directly beneath another node is listed there with `node: true`;
+- every `fs` entry with `node: true` has a `NODE.json` at that path (a nested name like `src/account/` is allowed, so a pass-through directory needs no node of its own) that the walk reaches — a node that is hidden, ignored or inside a mount is an error — and every node or mount directly beneath another node is listed there with `node: true`;
+- a mount's root node fits the schema; nothing else of a mounted tree is checked (see Mounts);
 - a node cites a page at most once;
 - with `--ref-index <file>`: every cited page appears in that file (a line's first run of digits is its page id), and a page whose line carries the superseded marker (`SUPERSEDED` by default, `--superseded-marker` to change) warns.
 
