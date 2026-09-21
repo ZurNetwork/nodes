@@ -13,7 +13,9 @@ use crate::error::Error;
 use crate::refindex::DEFAULT_SUPERSEDED_MARKER;
 use crate::render;
 use crate::repo::{LoadedNode, Repo};
-use crate::schema::{ChartedDate, Field, NODE_FILE, Node, NodePath, PageId, Ref};
+use crate::schema::{
+    Category, ChartedDate, Field, NODE_FILE, Node, NodePath, NodeType, PageId, Ref,
+};
 use crate::tree::NodeTree;
 
 /// NODE.json normalizer and lookup.
@@ -36,7 +38,7 @@ pub enum Command {
     /// a mounted tree's root is tagged `[mount]`.
     Tree,
     /// Every node, one line each: path + `short`.
-    Ls,
+    Ls(LsArgs),
     /// Root → … → node: the nodes a reader loads to understand a path.
     Chain {
         /// A repo-relative directory (or a file in it).
@@ -45,12 +47,12 @@ pub enum Command {
     /// One node, or one field of it.
     Get {
         path: String,
-        /// path, charted, short, is, conventions, entry_points, fs, refs or notes.
+        /// path, charted, short, is, type, categories, conventions, entry_points, fs, refs or notes.
         field: Option<Field>,
     },
     /// Every node citing a page.
     Refs { page: PageId },
-    /// Case-insensitive search over `short`, `is`, `fs[].role`, `conventions`, `notes`, `refs[].title` and `refs[].governs`.
+    /// Case-insensitive search over `short`, `is`, `type`, `categories`, `fs[].role`, `conventions`, `notes`, `refs[].title` and `refs[].governs`.
     Find { term: String },
     /// Normalize NODE.json files in place (default: every one in the repository).
     Fmt {
@@ -74,12 +76,33 @@ pub enum Command {
     },
     /// Remove the ref citing a page.
     RmRef { path: String, page: PageId },
+    /// Set `type` and `categories` together — also on a file written before they existed.
+    Classify {
+        path: String,
+        /// The one broad kind that fits best (see `nodes vocabulary`).
+        node_type: NodeType,
+        /// What the directory specifically holds, most fitting first.
+        #[arg(required = true)]
+        categories: Vec<Category>,
+    },
+    /// The closed vocabularies of `type` and `categories`, each term with its meaning.
+    Vocabulary,
     /// Set `charted` to today (UTC), or to --date.
     Touch {
         path: String,
         #[arg(long, value_name = "YYYY-MM-DD")]
         date: Option<ChartedDate>,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct LsArgs {
+    /// Only nodes carrying this category, best fit first (by its rank in each node's list).
+    #[arg(long, value_name = "CATEGORY")]
+    pub category: Option<Category>,
+    /// Only nodes of this type.
+    #[arg(long = "type", value_name = "TYPE")]
+    pub node_type: Option<NodeType>,
 }
 
 #[derive(Debug, Args)]
@@ -141,11 +164,21 @@ fn print(text: &str) -> Result<(), Error> {
 
 /// Runs one command; the exit code is `1` for a failed `check`, `0` otherwise.
 pub fn run(cli: Cli) -> Result<ExitCode, Error> {
-    let repo = open_repo(cli.root)?;
     let output = Output { json: cli.json };
+    // The vocabularies belong to the tool, not to a tree: printing them needs no root.
+    if matches!(cli.command, Command::Vocabulary) {
+        return vocabulary(output);
+    }
+    let repo = open_repo(cli.root)?;
     match cli.command {
+        Command::Vocabulary => vocabulary(output),
+        Command::Classify {
+            path,
+            node_type,
+            categories,
+        } => classify(&repo, &path, node_type, &categories, output),
         Command::Tree => tree(&repo, output),
-        Command::Ls => ls(&repo, output),
+        Command::Ls(args) => ls(&repo, &args, output),
         Command::Chain { path } => chain(&repo, &path, output),
         Command::Get { path, field } => get(&repo, &path, field, output),
         Command::Refs { page } => refs(&repo, page, output),
@@ -197,13 +230,19 @@ fn read_node(repo: &Repo, input: &str) -> Result<LoadedNode, Error> {
 
 /// The node at a typed path, for a write: a node of a mounted tree is refused.
 fn read_own_node(repo: &Repo, input: &str) -> Result<LoadedNode, Error> {
+    let file = own_node_file(repo, input)?;
+    repo.read(&file)
+}
+
+/// The `NODE.json` a write to a typed path lands in: this tree's own, and already there.
+fn own_node_file(repo: &Repo, input: &str) -> Result<PathBuf, Error> {
     let path = repo.node_path(input)?;
     refuse_inside_mount(repo, &path)?;
     let file = repo.node_file(&path);
     if !file.is_file() {
         return Err(Error::UnknownNode(path));
     }
-    repo.read(&file)
+    Ok(file)
 }
 
 /// Writes never cross a mount: `InsideMount` when `path` belongs to a mounted tree.
@@ -234,18 +273,33 @@ fn subtree_json(tree: &NodeTree, node: &LoadedNode) -> Value {
         .into_iter()
         .map(|child| subtree_json(tree, child))
         .collect();
-    json!({ "path": node.location, "mount": node.is_mount, "short": node.node.short, "is": node.node.is, "children": children })
+    json!({ "path": node.location, "mount": node.is_mount, "type": node.node.node_type, "categories": node.node.categories, "short": node.node.short, "is": node.node.is, "children": children })
 }
 
-fn ls(repo: &Repo, output: Output) -> Result<ExitCode, Error> {
+fn ls(repo: &Repo, args: &LsArgs, output: Output) -> Result<ExitCode, Error> {
     let tree = load_tree(repo)?;
-    let value: Vec<Value> = tree
+    let mut listed: Vec<&LoadedNode> = tree
         .iter()
-        .map(|node| {
-            json!({ "path": node.location, "mount": node.is_mount, "charted": node.node.charted, "short": node.node.short, "is": node.node.is })
+        .filter(|node| {
+            args.node_type
+                .is_none_or(|node_type| node.node.node_type == node_type)
+        })
+        .filter(|node| {
+            args.category
+                .is_none_or(|category| node.node.categories.rank_of(category).is_some())
         })
         .collect();
-    output.emit(&value, &render::ls_text(&tree))
+    if let Some(category) = args.category {
+        // A stable sort: nodes the category fits equally well keep their tree order.
+        listed.sort_by_key(|node| node.node.categories.rank_of(category));
+    }
+    let value: Vec<Value> = listed
+        .iter()
+        .map(|node| {
+            json!({ "path": node.location, "mount": node.is_mount, "type": node.node.node_type, "categories": node.node.categories, "charted": node.node.charted, "short": node.node.short, "is": node.node.is })
+        })
+        .collect();
+    output.emit(&value, &render::ls_text(&listed))
 }
 
 fn chain(repo: &Repo, input: &str, output: Output) -> Result<ExitCode, Error> {
@@ -326,6 +380,10 @@ fn hits_in(node: &LoadedNode, needle: &str) -> Vec<Hit> {
     };
     consider("short".to_owned(), &node.node.short);
     consider("is".to_owned(), &node.node.is);
+    consider("type".to_owned(), node.node.node_type.word());
+    for (rank, category) in node.node.categories.ranked().iter().enumerate() {
+        consider(format!("categories[{rank}]"), category.word());
+    }
     for entry in &node.node.fs {
         consider(format!("fs[{}].role", entry.name), &entry.role);
     }
@@ -482,6 +540,50 @@ fn rm_ref(repo: &Repo, input: &str, page: PageId, output: Output) -> Result<Exit
     }
     repo.write(&loaded.file, &loaded.node)?;
     output.written(&loaded.node)
+}
+
+/// One term of a closed vocabulary, as `nodes vocabulary` lists it.
+#[derive(Debug, Serialize)]
+struct Term {
+    term: &'static str,
+    meaning: &'static str,
+}
+
+fn vocabulary(output: Output) -> Result<ExitCode, Error> {
+    let types: Vec<Term> = NodeType::ALL
+        .iter()
+        .map(|node_type| Term {
+            term: node_type.word(),
+            meaning: node_type.meaning(),
+        })
+        .collect();
+    let categories: Vec<Term> = Category::ALL
+        .iter()
+        .map(|category| Term {
+            term: category.word(),
+            meaning: category.meaning(),
+        })
+        .collect();
+    let value = json!({ "type": types, "categories": categories });
+    output.emit(&value, &render::vocabulary_text())
+}
+
+fn classify(
+    repo: &Repo,
+    input: &str,
+    node_type: NodeType,
+    categories: &[Category],
+    output: Output,
+) -> Result<ExitCode, Error> {
+    let file = own_node_file(repo, input)?;
+    let text = std::fs::read_to_string(&file).map_err(|source| Error::io(&file, source))?;
+    let classified =
+        Node::parse_classified(&text, node_type, categories).map_err(|source| Error::Schema {
+            file: file.clone(),
+            source,
+        })?;
+    repo.write(&file, &classified)?;
+    output.written(&classified)
 }
 
 fn touch(

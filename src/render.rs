@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 
 use crate::repo::LoadedNode;
-use crate::schema::{Field, FsEntry, Node, Ref};
+use crate::schema::{Category, Field, FsEntry, Node, NodeType, Ref};
 use crate::tree::NodeTree;
 
 /// The whole node, every field labelled.
@@ -11,6 +11,9 @@ pub fn node_text(node: &Node) -> String {
     let mut text = format!("{}  (charted {})\n", node.path, node.charted);
     let _ = writeln!(text, "short: {}", node.short);
     let _ = writeln!(text, "is: {}", node.is);
+    let _ = writeln!(text, "type: {}", node.node_type);
+    let ranked_categories = category_words(node).join(", ");
+    let _ = writeln!(text, "categories: {ranked_categories}");
     push_list(&mut text, "conventions", node.conventions.iter().cloned());
     push_list(&mut text, "entry_points", node.entry_points.iter().cloned());
     push_list(&mut text, "fs", node.fs.iter().map(fs_line));
@@ -26,6 +29,8 @@ pub fn field_text(node: &Node, field: Field) -> String {
         Field::Charted => vec![node.charted.to_string()],
         Field::Short => vec![node.short.clone()],
         Field::Is => vec![node.is.clone()],
+        Field::Type => vec![node.node_type.to_string()],
+        Field::Categories => category_words(node),
         Field::Conventions => node.conventions.clone(),
         Field::EntryPoints => node.entry_points.clone(),
         Field::Fs => node.fs.iter().map(fs_line).collect(),
@@ -39,10 +44,30 @@ pub fn field_text(node: &Node, field: Field) -> String {
     text
 }
 
-/// `path  short`, one line per node.
-pub fn ls_text(tree: &NodeTree) -> String {
+/// Both closed vocabularies: a heading each, then `word  meaning`, one line per term.
+pub fn vocabulary_text() -> String {
     let mut text = String::new();
-    for node in tree.iter() {
+    let _ = writeln!(
+        text,
+        "type — what a directory broadly holds: the one kind that fits it best"
+    );
+    for node_type in NodeType::ALL {
+        let _ = writeln!(text, "  {node_type}  {}", node_type.meaning());
+    }
+    let _ = writeln!(
+        text,
+        "\ncategories — what a directory specifically holds, ranked from most to least fitting"
+    );
+    for category in Category::ALL {
+        let _ = writeln!(text, "  {category}  {}", category.meaning());
+    }
+    text
+}
+
+/// `path  short`, one line per node.
+pub fn ls_text(nodes: &[&LoadedNode]) -> String {
+    let mut text = String::new();
+    for node in nodes {
         let _ = writeln!(text, "{}  {}", node.location, node.node.short);
     }
     text
@@ -96,6 +121,15 @@ fn push_list(text: &mut String, label: &str, items: impl Iterator<Item = String>
     } else {
         let _ = writeln!(text, "{label}: (none)");
     }
+}
+
+/// The node's categories as words, best fit first.
+fn category_words(node: &Node) -> Vec<String> {
+    node.categories
+        .ranked()
+        .iter()
+        .map(ToString::to_string)
+        .collect()
 }
 
 fn fs_line(entry: &FsEntry) -> String {

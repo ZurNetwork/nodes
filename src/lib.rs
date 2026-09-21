@@ -15,3 +15,4 @@ pub mod render;
 pub mod repo;
 pub mod schema;
 pub mod tree;
+pub mod vocabulary;

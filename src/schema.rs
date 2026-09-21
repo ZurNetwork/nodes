@@ -8,6 +8,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 pub use crate::date::ChartedDate;
+pub use crate::vocabulary::{Categories, Category, NodeType};
 
 /// The file name every node lives in.
 pub const NODE_FILE: &str = "NODE.json";
@@ -24,6 +25,11 @@ pub struct Node {
     pub short: String,
     /// One sentence: what this directory IS.
     pub is: String,
+    /// What the directory broadly holds: the one kind that fits best.
+    #[serde(rename = "type")]
+    pub node_type: NodeType,
+    /// What it specifically holds, ranked from most to least fitting; author order.
+    pub categories: Categories,
     /// One rule per entry, terse; author order.
     pub conventions: Vec<String>,
     /// Files to read first, relative to this directory; author order.
@@ -59,6 +65,24 @@ impl Node {
     /// Parses one `NODE.json`; unknown keys, wrong types, bad dates and bad paths are all schema errors.
     pub fn parse(text: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(text)
+    }
+
+    /// Parses a node file whose classification the caller supplies, replacing whatever the file
+    /// says: the one door for a file written before `type` and `categories` existed. Everything
+    /// else must fit the schema as usual.
+    pub fn parse_classified(
+        text: &str,
+        node_type: NodeType,
+        categories: &[Category],
+    ) -> Result<Self, serde_json::Error> {
+        let mut whole: serde_json::Value = serde_json::from_str(text)?;
+        if let Some(fields) = whole.as_object_mut() {
+            let type_key = Field::Type.key().to_owned();
+            let categories_key = Field::Categories.key().to_owned();
+            fields.insert(type_key, serde_json::json!(node_type));
+            fields.insert(categories_key, serde_json::json!(categories));
+        }
+        serde_json::from_value(whole)
     }
 
     /// The same node in canonical order: `fs` by name, `refs` by page, everything else as authored.
@@ -99,13 +123,15 @@ impl Node {
     }
 }
 
-/// The nine fields of a node, as `get` and `set` name them.
+/// The fields of a node, as `get` and `set` name them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
     Path,
     Charted,
     Short,
     Is,
+    Type,
+    Categories,
     Conventions,
     EntryPoints,
     Fs,
@@ -115,11 +141,13 @@ pub enum Field {
 
 impl Field {
     /// Every field, in schema order.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::Path,
         Self::Charted,
         Self::Short,
         Self::Is,
+        Self::Type,
+        Self::Categories,
         Self::Conventions,
         Self::EntryPoints,
         Self::Fs,
@@ -134,6 +162,8 @@ impl Field {
             Self::Charted => "charted",
             Self::Short => "short",
             Self::Is => "is",
+            Self::Type => "type",
+            Self::Categories => "categories",
             Self::Conventions => "conventions",
             Self::EntryPoints => "entry_points",
             Self::Fs => "fs",
@@ -160,7 +190,7 @@ impl FromStr for Field {
     }
 }
 
-/// A field name that is not one of the eight.
+/// A field name the schema does not have.
 #[derive(Debug, PartialEq, Eq)]
 pub struct UnknownField(String);
 
@@ -452,6 +482,8 @@ mod tests {
   "charted": "2026-09-12",
   "short": "The crates",
   "is": "Twelve crates.",
+  "type": "code",
+  "categories": ["source", "tests"],
   "conventions": ["b second", "a first"],
   "entry_points": ["src/lib.rs"],
   "fs": [
@@ -483,6 +515,41 @@ mod tests {
         assert_eq!(once, twice);
         assert!(once.ends_with("}\n"));
         assert!(once.starts_with("{\n  \"path\": \"backend/crates\",\n  \"charted\":"));
+    }
+
+    #[test]
+    fn categories_keep_their_ranking_and_refuse_what_the_vocabulary_lacks() {
+        let ranked = sample().replacen(r#"["source", "tests"]"#, r#"["tests", "source"]"#, 1);
+        let node = Node::parse(&ranked).expect("valid").canonical();
+        let expected_ranking = [Category::Tests, Category::Source];
+        assert_eq!(node.categories.ranked(), expected_ranking);
+        assert_eq!(node.categories.rank_of(Category::Source), Some(1));
+        assert_eq!(node.categories.rank_of(Category::Finance), None);
+        assert_eq!(node.node_type, NodeType::Code);
+        let unknown_category = sample().replacen(r#""tests"]"#, r#""nonsense"]"#, 1);
+        let unknown_category_error = Node::parse(&unknown_category).expect_err("closed");
+        assert!(
+            unknown_category_error
+                .to_string()
+                .contains("unknown category `nonsense`; the categories are project, source,")
+        );
+        let unknown_type = sample().replacen(r#""type": "code""#, r#""type": "paperwork""#, 1);
+        let unknown_type_error = Node::parse(&unknown_type).expect_err("closed");
+        assert!(unknown_type_error.to_string().contains(
+            "unknown type `paperwork`; the types are code, document, art, media, data, software"
+        ));
+        let empty = sample().replacen(r#"["source", "tests"]"#, "[]", 1);
+        let empty_error = Node::parse(&empty).expect_err("at least one");
+        assert!(empty_error.to_string().contains("at least one category"));
+        let repeated = sample().replacen(r#""tests"]"#, r#""source"]"#, 1);
+        let repeated_error = Node::parse(&repeated).expect_err("ranked once");
+        assert!(
+            repeated_error
+                .to_string()
+                .contains("`source` is ranked more than once")
+        );
+        assert_eq!("ui".parse::<Category>(), Ok(Category::Ui));
+        assert_eq!(Category::Infrastructure.to_string(), "infrastructure");
     }
 
     #[test]
