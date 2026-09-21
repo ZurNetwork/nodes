@@ -792,3 +792,27 @@ fn a_listed_node_the_walk_never_reaches_is_an_error() {
         "{stdout}"
     );
 }
+
+#[test]
+fn a_line_git_would_not_understand_is_passed_over() {
+    let repo = TempRepo::charted();
+    repo.write(".chartignore", "a[\nfrontend/\n");
+    assert_eq!(listed_paths(&repo), [".", "backend", "backend/crates"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_ignore_file_stops_the_run() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = TempRepo::charted();
+    repo.write("frontend/.chartignore", "generated/\n");
+    let ignore_file = repo.root.join("frontend/.chartignore");
+    let no_access = fs::Permissions::from_mode(0o000);
+    fs::set_permissions(&ignore_file, no_access).expect("chmod");
+    if fs::read(&ignore_file).is_ok() {
+        return; // running as root: nothing is unreadable
+    }
+    let (_, stderr) = repo.fails(&["ls"]);
+    assert!(stderr.contains("frontend/.chartignore"), "{stderr}");
+}

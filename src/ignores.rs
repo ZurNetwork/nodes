@@ -1,6 +1,7 @@
 //! Which directories the walk stays out of: gitignore rules read from `.gitignore` and
 //! `.chartignore` at every level, plus hidden directories and a few names that are never charted.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use ignore::Match;
@@ -60,8 +61,9 @@ impl IgnoreRules {
     }
 }
 
-/// The rules one directory declares, or `None` when it holds no ignore file. A line git would not
-/// understand is passed over, as git does, rather than stopping the walk.
+/// The rules one directory declares, or `None` when it holds no ignore file. An ignore file that
+/// cannot be read stops the walk — rules that silently go missing would chart what was meant to be
+/// skipped — while a line git would not understand is passed over, as git does.
 fn layer_of(dir: &Path) -> Result<Option<Gitignore>, Error> {
     let declared: Vec<PathBuf> = IGNORE_FILES
         .iter()
@@ -73,7 +75,11 @@ fn layer_of(dir: &Path) -> Result<Option<Gitignore>, Error> {
     }
     let mut builder = GitignoreBuilder::new(dir);
     for file in &declared {
-        let _unreadable_lines = builder.add(file);
+        let bytes = fs::read(file).map_err(|source| Error::io(file, source))?;
+        let text = String::from_utf8_lossy(&bytes);
+        for line in text.lines() {
+            let _not_a_pattern = builder.add_line(Some(file.clone()), line);
+        }
     }
     let layer = builder.build().map_err(|source| Error::IgnoreRules {
         dir: dir.to_path_buf(),
