@@ -98,8 +98,8 @@ Patterns are matched against directories; a line git would not understand is pas
 
 ## Install
 
-Prebuilt binaries are attached to each `vX.Y.Z` release for Linux and macOS (x86_64 and aarch64). Or build from source:
+Prebuilt binaries are attached to each `vX.Y.Z` [release](https://github.com/ZurNetwork/nodes/releases) for Linux and macOS (x86_64 and aarch64). Or build a release from source, naming its tag:
 
 ```bash
-cargo install --git https://github.com/ZurNetwork/nodes --locked --tag v0.1.0
+cargo install --git https://github.com/ZurNetwork/nodes --locked --tag vX.Y.Z
 ```
