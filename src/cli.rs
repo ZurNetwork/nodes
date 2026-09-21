@@ -16,7 +16,7 @@ use crate::repo::{LoadedNode, Repo};
 use crate::schema::{
     Category, ChartedDate, Field, NODE_FILE, Node, NodePath, NodeType, PageId, Ref,
 };
-use crate::tree::NodeTree;
+use crate::tree::{NodeTree, Pruned};
 
 /// NODE.json normalizer and lookup.
 #[derive(Debug, Parser)]
@@ -35,10 +35,11 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// The whole node tree, drawn: each node's name (relative to its parent node) + `short`;
-    /// a mounted tree's root is tagged `[mount]`.
-    Tree,
+    /// a mounted tree's root is tagged `[mount]`. Filtered, it keeps the matches and the
+    /// ancestors that lead to them (drawn bare).
+    Tree(Selection),
     /// Every node, one line each: path + `short`.
-    Ls(LsArgs),
+    Ls(Selection),
     /// Root → … → node: the nodes a reader loads to understand a path.
     Chain {
         /// A repo-relative directory (or a file in it).
@@ -95,14 +96,31 @@ pub enum Command {
     },
 }
 
+/// Which nodes a listing keeps: by type, by category, both, or — with neither — all.
 #[derive(Debug, Args)]
-pub struct LsArgs {
-    /// Only nodes carrying this category, best fit first (by its rank in each node's list).
+pub struct Selection {
+    /// Only nodes carrying this category; `ls` lists them best fit first (by its rank in each node's list).
     #[arg(long, value_name = "CATEGORY")]
     pub category: Option<Category>,
     /// Only nodes of this type.
     #[arg(long = "type", value_name = "TYPE")]
     pub node_type: Option<NodeType>,
+}
+
+impl Selection {
+    fn is_everything(&self) -> bool {
+        self.category.is_none() && self.node_type.is_none()
+    }
+
+    fn admits(&self, node: &Node) -> bool {
+        let type_fits = self
+            .node_type
+            .is_none_or(|node_type| node.node_type == node_type);
+        let category_fits = self
+            .category
+            .is_none_or(|category| node.categories.rank_of(category).is_some());
+        type_fits && category_fits
+    }
 }
 
 #[derive(Debug, Args)]
@@ -177,8 +195,8 @@ pub fn run(cli: Cli) -> Result<ExitCode, Error> {
             node_type,
             categories,
         } => classify(&repo, &path, node_type, &categories, output),
-        Command::Tree => tree(&repo, output),
-        Command::Ls(args) => ls(&repo, &args, output),
+        Command::Tree(selection) => tree(&repo, &selection, output),
+        Command::Ls(selection) => ls(&repo, &selection, output),
         Command::Chain { path } => chain(&repo, &path, output),
         Command::Get { path, field } => get(&repo, &path, field, output),
         Command::Refs { page } => refs(&repo, page, output),
@@ -258,38 +276,48 @@ fn refuse_inside_mount(repo: &Repo, path: &NodePath) -> Result<(), Error> {
     Err(inside_mount)
 }
 
-fn tree(repo: &Repo, output: Output) -> Result<ExitCode, Error> {
+fn tree(repo: &Repo, selection: &Selection, output: Output) -> Result<ExitCode, Error> {
     let tree = load_tree(repo)?;
     let root = tree
         .root()
         .ok_or_else(|| Error::UnknownNode(NodePath::root()))?;
-    let value = subtree_json(&tree, root);
-    output.emit(&value, &render::tree_text(&tree))
+    let pruned = tree.pruned_to(|node| selection.admits(&node.node));
+    let value = if pruned.draws(&root.location) {
+        subtree_json(&tree, &pruned, selection, root)
+    } else {
+        Value::Null
+    };
+    output.emit(&value, &render::tree_text(&tree, &pruned))
 }
 
-fn subtree_json(tree: &NodeTree, node: &LoadedNode) -> Value {
+/// One drawn node and everything drawn beneath it. A filtered tree says which entries `match`;
+/// an unfiltered one keeps its shape.
+fn subtree_json(
+    tree: &NodeTree,
+    pruned: &Pruned,
+    selection: &Selection,
+    node: &LoadedNode,
+) -> Value {
     let children: Vec<Value> = tree
         .children(&node.location)
         .into_iter()
-        .map(|child| subtree_json(tree, child))
+        .filter(|child| pruned.draws(&child.location))
+        .map(|child| subtree_json(tree, pruned, selection, child))
         .collect();
-    json!({ "path": node.location, "mount": node.is_mount, "type": node.node.node_type, "categories": node.node.categories, "short": node.node.short, "is": node.node.is, "children": children })
+    let mut entry = json!({ "path": node.location, "mount": node.is_mount, "type": node.node.node_type, "categories": node.node.categories, "short": node.node.short, "is": node.node.is, "children": children });
+    if !selection.is_everything() {
+        entry["match"] = json!(pruned.matches(&node.location));
+    }
+    entry
 }
 
-fn ls(repo: &Repo, args: &LsArgs, output: Output) -> Result<ExitCode, Error> {
+fn ls(repo: &Repo, selection: &Selection, output: Output) -> Result<ExitCode, Error> {
     let tree = load_tree(repo)?;
     let mut listed: Vec<&LoadedNode> = tree
         .iter()
-        .filter(|node| {
-            args.node_type
-                .is_none_or(|node_type| node.node.node_type == node_type)
-        })
-        .filter(|node| {
-            args.category
-                .is_none_or(|category| node.node.categories.rank_of(category).is_some())
-        })
+        .filter(|node| selection.admits(&node.node))
         .collect();
-    if let Some(category) = args.category {
+    if let Some(category) = selection.category {
         // A stable sort: nodes the category fits equally well keep their tree order.
         listed.sort_by_key(|node| node.node.categories.rank_of(category));
     }
