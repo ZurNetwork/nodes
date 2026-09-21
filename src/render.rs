@@ -49,7 +49,8 @@ pub fn ls_text(tree: &NodeTree) -> String {
 }
 
 /// The tree from the root, drawn with box connectors; each line names the node relative to its
-/// parent node (so a node two directories down reads `api/v1`) and gives its `short`.
+/// parent node (so a node two directories down reads `api/v1`) and gives its `short`. The root of
+/// a mounted tree is tagged `[mount]`.
 pub fn tree_text(tree: &NodeTree) -> String {
     let mut text = String::new();
     let Some(root) = tree.root() else {
@@ -70,7 +71,12 @@ fn push_children(text: &mut String, tree: &NodeTree, parent: &LoadedNode, prefix
             .location
             .relative(&child.location)
             .unwrap_or(child.location.as_str());
-        let _ = writeln!(text, "{prefix}{connector}{name}  {}", child.node.short);
+        let mount_tag = if child.is_mount { "  [mount]" } else { "" };
+        let _ = writeln!(
+            text,
+            "{prefix}{connector}{name}{mount_tag}  {}",
+            child.node.short
+        );
         let deeper = if last { "    " } else { "│   " };
         let child_prefix = format!("{prefix}{deeper}");
         push_children(text, tree, child, &child_prefix);

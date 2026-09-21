@@ -81,6 +81,55 @@ impl TempRepo {
         repo
     }
 
+    /// A root that mounts two other trees: `life` (which itself mounts `life/archive`) and, beneath
+    /// the pass-through `code/`, `code/zurfur`.
+    fn mounting() -> Self {
+        let repo = Self::new();
+        let home = node(
+            ".",
+            "Home.",
+            &[
+                ("code/zurfur/", "the monorepo — own tree", true),
+                ("life/", "documents — own tree", true),
+            ],
+            &[],
+            &[],
+        );
+        repo.write("NODE.json", &home);
+        let life = node(
+            ".",
+            "Personal documents.",
+            &[
+                ("archive/", "closed years — own tree", true),
+                ("housing/", "where we live", true),
+            ],
+            &[],
+            &[],
+        );
+        repo.write("life/NODE.json", &life);
+        let housing = node(
+            "housing",
+            "Lease and utilities.",
+            &[],
+            &[(7, "The Lease", "the tenancy")],
+            &[],
+        );
+        repo.write("life/housing/NODE.json", &housing);
+        let archive = node(
+            ".",
+            "Closed years.",
+            &[("2019/", "that year", true)],
+            &[],
+            &[],
+        );
+        repo.write("life/archive/NODE.json", &archive);
+        let year = node("2019", "Everything from 2019.", &[], &[], &[]);
+        repo.write("life/archive/2019/NODE.json", &year);
+        let zurfur = node(".", "The Zurfur monorepo.", &[], &[], &[]);
+        repo.write("code/zurfur/NODE.json", &zurfur);
+        repo
+    }
+
     fn write(&self, relative: &str, text: &str) {
         let file = self.root.join(relative);
         let parent = file.parent().expect("a parent");
@@ -446,4 +495,324 @@ fn the_root_is_discovered_from_any_directory_beneath_it() {
         .expect("runs");
     assert!(!outside.status.success());
     assert!(String::from_utf8_lossy(&outside.stderr).contains("no root NODE.json"));
+}
+
+/// The paths `ls` prints, one per node.
+fn listed_paths(repo: &TempRepo) -> Vec<String> {
+    repo.ok(&["ls"])
+        .lines()
+        .map(|line| line.split("  ").next().expect("a path").to_owned())
+        .collect()
+}
+
+#[test]
+fn reads_cross_a_mount_with_paths_rebased_onto_the_outer_root() {
+    let repo = TempRepo::mounting();
+    let tree = repo.ok(&["tree"]);
+    let drawn = "\
+.  Home
+├── code/zurfur  [mount]  The Zurfur monorepo
+└── life  [mount]  Personal documents
+    ├── archive  [mount]  Closed years
+    │   └── 2019  Everything from 2019
+    └── housing  Lease and utilities
+";
+    assert_eq!(tree, drawn);
+    let ls = repo.ok(&["ls"]);
+    let listed = "\
+.  Home
+code/zurfur  The Zurfur monorepo
+life  Personal documents
+life/archive  Closed years
+life/archive/2019  Everything from 2019
+life/housing  Lease and utilities
+";
+    assert_eq!(ls, listed);
+    let chain = repo.ok(&["--json", "chain", "life/archive/2019/taxes.pdf"]);
+    let parsed: Value = serde_json::from_str(&chain).expect("json");
+    let paths: Vec<&str> = parsed
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|n| n["path"].as_str().expect("path"))
+        .collect();
+    assert_eq!(paths, [".", "life", "life/archive", "life/archive/2019"]);
+    assert_eq!(repo.ok(&["get", "life/housing", "path"]), "life/housing\n");
+    assert_eq!(repo.ok(&["get", "life", "path"]), "life\n");
+    assert_eq!(
+        repo.ok(&["get", "life/archive/2019", "path"]),
+        "life/archive/2019\n"
+    );
+    let whole = repo.ok(&["get", "life/housing"]);
+    assert!(
+        whole.starts_with("life/housing  (charted 2026-09-12)\nshort: Lease and utilities\n"),
+        "{whole}"
+    );
+    assert_eq!(
+        repo.ok(&["find", "LEASE"]),
+        "life/housing  short: Lease and utilities\nlife/housing  is: Lease and utilities.\nlife/housing  refs[7].title: The Lease\n"
+    );
+    assert_eq!(
+        repo.ok(&["refs", "7"]),
+        "life/housing  The Lease — the tenancy\n"
+    );
+    let tree_json: Value = serde_json::from_str(&repo.ok(&["--json", "tree"])).expect("json");
+    assert_eq!(tree_json["mount"], false);
+    let life = &tree_json["children"][1];
+    assert_eq!(life["path"], "life");
+    assert_eq!(life["mount"], true);
+    assert_eq!(life["children"][0]["path"], "life/archive");
+    assert_eq!(life["children"][0]["mount"], true);
+    assert_eq!(life["children"][1]["mount"], false);
+    let ls_json: Value = serde_json::from_str(&repo.ok(&["--json", "ls"])).expect("json");
+    let mounts: Vec<bool> = ls_json
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|n| n["mount"].as_bool().expect("mount"))
+        .collect();
+    assert_eq!(mounts, [false, true, true, true, false, false]);
+}
+
+#[test]
+fn a_mounted_tree_reads_the_same_from_its_own_root() {
+    let repo = TempRepo::mounting();
+    let from_inside = Command::new(env!("CARGO_BIN_EXE_nodes"))
+        .current_dir(repo.root.join("life/housing"))
+        .arg("ls")
+        .output()
+        .expect("runs");
+    assert!(from_inside.status.success());
+    let listed = String::from_utf8(from_inside.stdout).expect("utf-8");
+    assert_eq!(
+        listed,
+        ".  Personal documents\narchive  Closed years\narchive/2019  Everything from 2019\nhousing  Lease and utilities\n",
+        "the nearest root wins, and its own mounts are crossed too"
+    );
+}
+
+#[test]
+fn check_stops_at_a_mount_and_reads_only_its_root() {
+    let repo = TempRepo::mounting();
+    repo.write("docs/index.md", "- `1` — The only citable page\n");
+    let mislocated = node(
+        "elsewhere",
+        "Broken inside the mount.",
+        &[("ghost/", "absent", true)],
+        &[(99, "Nowhere", "not in the outer index")],
+        &[],
+    );
+    repo.write("life/housing/NODE.json", &mislocated);
+    let report = repo.ok(&["check", "--ref-index", &repo.index_arg()]);
+    assert_eq!(report, "1 nodes, 2 mounts, 0 errors, 0 warnings\n");
+    let report_json: Value = serde_json::from_str(&repo.ok(&["--json", "check"])).expect("json");
+    assert_eq!(report_json["nodes"], 1);
+    assert_eq!(report_json["mounts"], 2);
+    let broken_root = node(".", "Personal documents.", &[], &[], &[])
+        .replace("\"notes\": []", "\"notes\": [], \"extra\": 1");
+    repo.write("life/NODE.json", &broken_root);
+    let (stdout, _) = repo.fails(&["check"]);
+    assert!(stdout.contains("error: life: "), "{stdout}");
+    assert!(stdout.contains("unknown field `extra`"), "{stdout}");
+    assert!(
+        stdout.contains("1 nodes, 2 mounts, 1 errors, 0 warnings"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn a_mount_is_listed_by_its_parent_with_node_true() {
+    let repo = TempRepo::mounting();
+    let listed_false = node(
+        ".",
+        "Home.",
+        &[
+            ("code/zurfur/", "the monorepo — own tree", true),
+            ("life/", "documents — own tree", false),
+        ],
+        &[],
+        &[],
+    );
+    repo.write("NODE.json", &listed_false);
+    let (stdout, _) = repo.fails(&["check"]);
+    assert!(
+        stdout.contains("error: life: listed in `.`'s fs with node: false, but it has a NODE.json"),
+        "{stdout}"
+    );
+    let unlisted = node(".", "Home.", &[], &[], &[]);
+    repo.write("NODE.json", &unlisted);
+    let (stdout, _) = repo.fails(&["check"]);
+    assert!(
+        stdout.contains("error: life: not listed in `.`'s fs"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("code/zurfur"),
+        "a mount beneath a pass-through directory need not be listed: {stdout}"
+    );
+}
+
+#[test]
+fn writes_and_fmt_never_cross_a_mount() {
+    let repo = TempRepo::mounting();
+    let messy = r#"{"notes": [], "short": "Messy", "refs": [], "fs": [], "entry_points": [],
+        "conventions": [], "is": "Messy.", "charted": "2026-01-02", "path": "housing"}"#;
+    repo.write("life/housing/NODE.json", messy);
+    let refused = [
+        vec!["set", "life/housing", "short", "Rewritten"],
+        vec!["set", "life", "short", "Rewritten"],
+        vec!["touch", "life/housing", "--date", "2030-01-31"],
+        vec!["add-ref", "life/housing", "5", "Early", "sorts first"],
+        vec!["rm-ref", "life/housing", "7"],
+        vec!["fmt", "life/housing"],
+        vec!["fmt", "life/archive/2019/NODE.json"],
+    ];
+    for args in &refused {
+        let (_, stderr) = repo.fails(args);
+        assert!(
+            stderr.contains("belongs to the tree mounted at `life"),
+            "{args:?}: {stderr}"
+        );
+    }
+    let (_, stderr) = repo.fails(&["set", "life/archive/2019", "short", "Rewritten"]);
+    let innermost = format!(
+        "nodes: `life/archive/2019` belongs to the tree mounted at `life/archive`; writes do not cross a mount — run this with --root {}\n",
+        repo.root.join("life/archive").display()
+    );
+    assert_eq!(stderr, innermost);
+    let bare = repo.ok(&["fmt"]);
+    assert_eq!(bare, "", "a bare fmt formats this tree's files only");
+    assert_eq!(repo.read("life/housing/NODE.json"), messy);
+    let life_root = repo.root.join("life");
+    let from_its_own_root = Command::new(env!("CARGO_BIN_EXE_nodes"))
+        .arg("--root")
+        .arg(&life_root)
+        .arg("fmt")
+        .output()
+        .expect("runs");
+    assert!(from_its_own_root.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&from_its_own_root.stdout),
+        "fmt: housing/NODE.json\n"
+    );
+}
+
+#[test]
+fn ignore_files_follow_gitignore_semantics() {
+    let repo = TempRepo::charted();
+    let stray = |path: &str| node(path, "A stray node.", &[], &[], &[]);
+    for dir in [
+        "build",
+        "backend/build",
+        "frontend/generated",
+        "a.cache",
+        "keep.cache",
+        "dist",
+        "vendor",
+        "frontend/out",
+        "backend/out",
+        ".hidden",
+        ".github",
+        "target",
+    ] {
+        repo.write(&format!("{dir}/NODE.json"), &stray(dir));
+    }
+    repo.write(".gitignore", "dist/\nvendor/\n");
+    repo.write("frontend/.gitignore", "/out/\n");
+    repo.write(
+        ".chartignore",
+        "# anchored, nested, globbed, negated\n/build/\nfrontend/generated/\n*.cache/\n!keep.cache/\n!vendor/\n!.github/\n",
+    );
+    let visible = listed_paths(&repo);
+    let expected = [
+        ".",
+        ".github",
+        "backend",
+        "backend/build",
+        "backend/crates",
+        "backend/out",
+        "frontend",
+        "keep.cache",
+        "vendor",
+    ];
+    assert_eq!(visible, expected);
+}
+
+#[test]
+fn a_mount_reads_under_its_own_ignore_files_and_an_ignored_mount_is_not_read() {
+    let repo = TempRepo::mounting();
+    repo.write(".chartignore", "housing/\n");
+    repo.write("life/.chartignore", "/archive/\n");
+    let visible = listed_paths(&repo);
+    assert_eq!(
+        visible,
+        [".", "code/zurfur", "life", "life/housing"],
+        "the outer `housing/` line does not reach into the mount; the mount's own `/archive/` does"
+    );
+    repo.write(".chartignore", "/life/\n");
+    assert_eq!(listed_paths(&repo), [".", "code/zurfur"]);
+}
+
+#[test]
+fn a_listed_node_the_walk_never_reaches_is_an_error() {
+    let repo = TempRepo::mounting();
+    let home = node(
+        ".",
+        "Home.",
+        &[
+            (".index/", "hidden, yet charted", true),
+            ("code/zurfur/", "the monorepo — own tree", true),
+            ("life/", "documents — own tree", true),
+            ("life/housing/", "a node of another tree", true),
+        ],
+        &[],
+        &[],
+    );
+    repo.write("NODE.json", &home);
+    let index = node(".index", "The hidden index.", &[], &[], &[]);
+    repo.write(".index/NODE.json", &index);
+    let (stdout, _) = repo.fails(&["check"]);
+    let expected_lines = [
+        "error: .: fs entry `.index/` says node: true but `.index` is hidden or ignored — re-include it with a `!` line in .chartignore, or say node: false",
+        "error: .: fs entry `life/housing/` says node: true but `life/housing` belongs to the tree mounted at `life`",
+        "1 nodes, 2 mounts, 2 errors, 0 warnings",
+    ];
+    for line in expected_lines {
+        assert!(stdout.contains(line), "missing {line:?} in:\n{stdout}");
+    }
+    repo.write(".chartignore", "!.index/\n/code/\n");
+    let (stdout, _) = repo.fails(&["check"]);
+    assert!(
+        stdout.contains("error: .: fs entry `code/zurfur/` says node: true but `code/zurfur` is hidden or ignored"),
+        "an ignored mount is as unreachable as an ignored node: {stdout}"
+    );
+    assert!(!stdout.contains("`.index`"), "{stdout}");
+    assert!(
+        stdout.contains("2 nodes, 1 mounts, 2 errors, 0 warnings"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn a_line_git_would_not_understand_is_passed_over() {
+    let repo = TempRepo::charted();
+    repo.write(".chartignore", "a[\nfrontend/\n");
+    assert_eq!(listed_paths(&repo), [".", "backend", "backend/crates"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_ignore_file_stops_the_run() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = TempRepo::charted();
+    repo.write("frontend/.chartignore", "generated/\n");
+    let ignore_file = repo.root.join("frontend/.chartignore");
+    let no_access = fs::Permissions::from_mode(0o000);
+    fs::set_permissions(&ignore_file, no_access).expect("chmod");
+    if fs::read(&ignore_file).is_ok() {
+        return; // running as root: nothing is unreadable
+    }
+    let (_, stderr) = repo.fails(&["ls"]);
+    assert!(stderr.contains("frontend/.chartignore"), "{stderr}");
 }

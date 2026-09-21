@@ -253,6 +253,18 @@ impl NodePath {
         other.0.strip_prefix(self.0.as_str())?.strip_prefix('/')
     }
 
+    /// This path as seen from a tree that mounts this path's own tree at `mount_point`: the
+    /// mounted root becomes the mount point, everything else sits beneath it.
+    pub fn mounted_at(&self, mount_point: &Self) -> Self {
+        if self.is_root() {
+            return mount_point.clone();
+        }
+        if mount_point.is_root() {
+            return self.clone();
+        }
+        Self(format!("{mount_point}/{self}"))
+    }
+
     /// The directory on disk under `root`.
     pub fn to_dir(&self, root: &Path) -> PathBuf {
         if self.is_root() {
@@ -513,6 +525,17 @@ mod tests {
         assert!(!backend_dash.is_ancestor_of(&backend_crates));
         assert_eq!(backend.relative(&backend_crates), Some("crates"));
         assert_eq!(root.relative(&backend_crates), Some("backend/crates"));
+    }
+
+    #[test]
+    fn a_mounted_path_is_rebased_onto_the_mount_point() {
+        let root = NodePath::root();
+        let mount_point: NodePath = "code/zurfur".parse().expect("valid");
+        let backend: NodePath = "backend".parse().expect("valid");
+        let rebased: NodePath = "code/zurfur/backend".parse().expect("valid");
+        assert_eq!(backend.mounted_at(&mount_point), rebased);
+        assert_eq!(root.mounted_at(&mount_point), mount_point);
+        assert_eq!(backend.mounted_at(&root), backend);
     }
 
     #[test]

@@ -1,11 +1,12 @@
 {
   "path": ".",
-  "charted": "2026-09-12",
+  "charted": "2026-09-21",
   "short": "The NODE.json normalizer and lookup CLI",
   "is": "nodes — the NODE.json normalizer and lookup CLI: a small Rust program that formats, validates and queries a repository's per-directory NODE.json chart files (Zurfur is the first consumer).",
   "conventions": [
-    "Rust edition 2024; dependencies are serde, serde_json and clap (derive) — nothing else unless it earns its place.",
+    "Rust edition 2024; dependencies are serde, serde_json, clap (derive) and ignore (its gitignore matcher) — nothing else unless it earns its place.",
     "The schema IS the serde structs (deny_unknown_fields); `nodes fmt` is parse → serialize and must be idempotent.",
+    "A mount — a nested root — is a boundary for writes and check, transparent for reads; every printed path is relative to the root asked from.",
     "New code follows the Zurfur semantic style rulebook: newtypes for domain-meaningful primitives, named multi-line constructions, combinators over match-plumbing, std traits first, clarity over brevity.",
     "main is protected; work lands by squash-merged PR from feature/*, bug/* or chore/* branches."
   ],
@@ -17,7 +18,7 @@
   "fs": [
     {
       "name": ".chartignore",
-      "role": "dirs /chart skips",
+      "role": "dirs the walk skips, gitignore syntax",
       "node": false
     },
     {
@@ -42,17 +43,17 @@
     },
     {
       "name": "Cargo.toml",
-      "role": "the one crate — bin `nodes`, edition 2024; deps clap, serde, serde_json",
+      "role": "the one crate — bin `nodes`, edition 2024; deps clap, ignore, serde, serde_json",
       "node": false
     },
     {
       "name": "README.md",
-      "role": "the schema, the command table, canonical form, check rules, install",
+      "role": "the schema, the command table, mounts, ignore files, canonical form, check rules, install",
       "node": false
     },
     {
       "name": "src/",
-      "role": "the CLI: schema.rs (the structs + newtypes), date.rs, repo.rs (discovery, read/write), tree.rs, refindex.rs, check.rs, render.rs, cli.rs",
+      "role": "the CLI: schema.rs (the structs + newtypes), date.rs, ignores.rs (gitignore rules for the walk), repo.rs (discovery, the walk, mounts, read/write), tree.rs, refindex.rs, check.rs, render.rs, cli.rs",
       "node": false
     },
     {

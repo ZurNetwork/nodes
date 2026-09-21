@@ -32,7 +32,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// The whole node tree, drawn: each node's name (relative to its parent node) + `short`.
+    /// The whole node tree, drawn: each node's name (relative to its parent node) + `short`;
+    /// a mounted tree's root is tagged `[mount]`.
     Tree,
     /// Every node, one line each: path + `short`.
     Ls,
@@ -174,19 +175,48 @@ fn open_repo(root: Option<PathBuf>) -> Result<Repo, Error> {
     Ok(Repo::at(canonical))
 }
 
+/// The tree a reader sees: this repository's nodes and every mounted tree's.
 fn load_tree(repo: &Repo) -> Result<NodeTree, Error> {
-    let nodes = repo.read_all()?;
+    let nodes = repo.read_across_mounts()?;
     Ok(NodeTree::from_nodes(nodes))
 }
 
-/// The node at a typed path, or `UnknownNode`.
+/// The node at a typed path — this tree's or a mounted tree's — or `UnknownNode`.
 fn read_node(repo: &Repo, input: &str) -> Result<LoadedNode, Error> {
     let path = repo.node_path(input)?;
     let file = repo.node_file(&path);
     if !file.is_file() {
         return Err(Error::UnknownNode(path));
     }
+    let Some(mount_point) = repo.mount_holding(&path) else {
+        return repo.read(&file);
+    };
+    let mounted_node = repo.mounted_tree(&mount_point).read(&file)?;
+    Ok(mounted_node.mounted_at(&mount_point))
+}
+
+/// The node at a typed path, for a write: a node of a mounted tree is refused.
+fn read_own_node(repo: &Repo, input: &str) -> Result<LoadedNode, Error> {
+    let path = repo.node_path(input)?;
+    refuse_inside_mount(repo, &path)?;
+    let file = repo.node_file(&path);
+    if !file.is_file() {
+        return Err(Error::UnknownNode(path));
+    }
     repo.read(&file)
+}
+
+/// Writes never cross a mount: `InsideMount` when `path` belongs to a mounted tree.
+fn refuse_inside_mount(repo: &Repo, path: &NodePath) -> Result<(), Error> {
+    let Some(mount) = repo.mount_holding(path) else {
+        return Ok(());
+    };
+    let inside_mount = Error::InsideMount {
+        path: path.clone(),
+        mount_dir: mount.to_dir(repo.root()),
+        mount,
+    };
+    Err(inside_mount)
 }
 
 fn tree(repo: &Repo, output: Output) -> Result<ExitCode, Error> {
@@ -204,7 +234,7 @@ fn subtree_json(tree: &NodeTree, node: &LoadedNode) -> Value {
         .into_iter()
         .map(|child| subtree_json(tree, child))
         .collect();
-    json!({ "path": node.location, "short": node.node.short, "is": node.node.is, "children": children })
+    json!({ "path": node.location, "mount": node.is_mount, "short": node.node.short, "is": node.node.is, "children": children })
 }
 
 fn ls(repo: &Repo, output: Output) -> Result<ExitCode, Error> {
@@ -212,7 +242,7 @@ fn ls(repo: &Repo, output: Output) -> Result<ExitCode, Error> {
     let value: Vec<Value> = tree
         .iter()
         .map(|node| {
-            json!({ "path": node.location, "charted": node.node.charted, "short": node.node.short, "is": node.node.is })
+            json!({ "path": node.location, "mount": node.is_mount, "charted": node.node.charted, "short": node.node.short, "is": node.node.is })
         })
         .collect();
     output.emit(&value, &render::ls_text(&tree))
@@ -330,6 +360,8 @@ fn fmt(repo: &Repo, files: &[PathBuf], output: Output) -> Result<ExitCode, Error
     };
     let mut visited = Vec::new();
     for file in &targets {
+        let location = repo.location_of(file)?;
+        refuse_inside_mount(repo, &location)?;
         let loaded = repo.read(file)?;
         let changed = repo.write(file, &loaded.node)?;
         visited.push(Formatted {
@@ -372,8 +404,12 @@ fn check(repo: &Repo, args: CheckArgs, output: Output) -> Result<ExitCode, Error
             finding.severity, finding.path, finding.message
         ));
     }
+    let mounts = match report.mounts {
+        0 => String::new(),
+        count => format!(" {count} mounts,"),
+    };
     text.push_str(&format!(
-        "{} nodes, {} errors, {} warnings\n",
+        "{} nodes,{mounts} {} errors, {} warnings\n",
         report.nodes, report.errors, report.warnings
     ));
     output.emit(&report, &text)?;
@@ -405,7 +441,7 @@ fn set(
         return Err(Error::PathIsDerived);
     }
     let value: Value = serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_owned()));
-    let loaded = read_node(repo, input)?;
+    let loaded = read_own_node(repo, input)?;
     let updated = loaded
         .node
         .with_field(field, value)
@@ -422,7 +458,7 @@ fn add_ref(
     governs: String,
     output: Output,
 ) -> Result<ExitCode, Error> {
-    let mut loaded = read_node(repo, input)?;
+    let mut loaded = read_own_node(repo, input)?;
     loaded.node.refs.retain(|reference| reference.page != page);
     let added = Ref {
         page,
@@ -435,7 +471,7 @@ fn add_ref(
 }
 
 fn rm_ref(repo: &Repo, input: &str, page: PageId, output: Output) -> Result<ExitCode, Error> {
-    let mut loaded = read_node(repo, input)?;
+    let mut loaded = read_own_node(repo, input)?;
     let before = loaded.node.refs.len();
     loaded.node.refs.retain(|reference| reference.page != page);
     if loaded.node.refs.len() == before {
@@ -454,7 +490,7 @@ fn touch(
     date: Option<ChartedDate>,
     output: Output,
 ) -> Result<ExitCode, Error> {
-    let mut loaded = read_node(repo, input)?;
+    let mut loaded = read_own_node(repo, input)?;
     loaded.node.charted = date.unwrap_or_else(ChartedDate::today_utc);
     repo.write(&loaded.file, &loaded.node)?;
     output.written(&loaded.node)
