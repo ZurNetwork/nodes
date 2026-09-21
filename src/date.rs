@@ -99,10 +99,17 @@ impl TryFrom<SystemTime> for ModifiedTime {
     type Error = TimeOutOfRange;
 
     /// A file system may hand back any 64-bit reading; only one a calendar can print is kept.
+    /// The fraction of a second is dropped by rounding down, on both sides of the epoch: a
+    /// millisecond before 1970 is 23:59:59, not midnight.
     fn try_from(time: SystemTime) -> Result<Self, TimeOutOfRange> {
         let seconds_since_epoch = match time.duration_since(UNIX_EPOCH) {
             Ok(after) => i64::try_from(after.as_secs()),
-            Err(before) => i64::try_from(before.duration().as_secs()).map(|seconds| -seconds),
+            Err(before) => {
+                let until_epoch = before.duration();
+                let started_second = u64::from(until_epoch.subsec_nanos() > 0);
+                let whole_seconds = until_epoch.as_secs().saturating_add(started_second);
+                i64::try_from(whole_seconds).map(|seconds| -seconds)
+            }
         }
         .map_err(|_| TimeOutOfRange)?;
         if !(Self::EARLIEST..=Self::LATEST).contains(&seconds_since_epoch) {
@@ -263,6 +270,17 @@ mod tests {
         assert_eq!(
             printed(a_second_before),
             Ok("1969-12-31T23:59:59Z".to_owned())
+        );
+        let a_millisecond_before = UNIX_EPOCH - Duration::from_millis(1);
+        assert_eq!(
+            printed(a_millisecond_before),
+            Ok("1969-12-31T23:59:59Z".to_owned()),
+            "a fraction rounds down before the epoch too, never towards it"
+        );
+        let almost_two_seconds_after = UNIX_EPOCH + Duration::from_millis(1_999);
+        assert_eq!(
+            printed(almost_two_seconds_after),
+            Ok("1970-01-01T00:00:01Z".to_owned())
         );
         assert_eq!(
             printed(after(253_402_300_799)),
