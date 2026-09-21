@@ -20,6 +20,9 @@ impl TempRepo {
         let root =
             std::env::temp_dir().join(format!("nodes-cli-test-{}-{unique}", std::process::id()));
         fs::create_dir_all(&root).expect("temp dir");
+        // The binary canonicalizes `--root`, and macOS keeps its temp dir behind a symlink
+        // (`/var` → `/private/var`): hold the canonical root, so an expected path is the printed one.
+        let root = root.canonicalize().expect("a canonical temp dir");
         Self { root }
     }
 
