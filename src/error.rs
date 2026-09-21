@@ -37,6 +37,14 @@ pub enum Error {
     PathIsDerived,
     /// `rm-ref` on a page the node does not cite.
     RefNotCited { path: NodePath, page: PageId },
+    /// A write aimed at a node of a mounted tree: writes never cross a mount.
+    InsideMount {
+        path: NodePath,
+        mount: NodePath,
+        mount_dir: PathBuf,
+    },
+    /// A directory's ignore files could not be compiled into rules.
+    IgnoreRules { dir: PathBuf, source: ignore::Error },
 }
 
 impl Error {
@@ -78,6 +86,18 @@ impl fmt::Display for Error {
             Self::RefNotCited { path, page } => {
                 write!(f, "`{path}` does not cite page {page}")
             }
+            Self::InsideMount {
+                path,
+                mount,
+                mount_dir,
+            } => write!(
+                f,
+                "`{path}` belongs to the tree mounted at `{mount}`; writes do not cross a mount — run this with --root {}",
+                mount_dir.display()
+            ),
+            Self::IgnoreRules { dir, source } => {
+                write!(f, "{}: ignore rules: {source}", dir.display())
+            }
         }
     }
 }
@@ -87,6 +107,7 @@ impl std::error::Error for Error {
         match self {
             Self::Io { source, .. } => Some(source),
             Self::Schema { source, .. } | Self::InvalidValue { source, .. } => Some(source),
+            Self::IgnoreRules { source, .. } => Some(source),
             _ => None,
         }
     }

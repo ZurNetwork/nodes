@@ -3,13 +3,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::error::Error;
-use crate::schema::{NODE_FILE, Node, NodePath};
+use serde::Deserialize;
 
-/// Directories never descended into, whatever `.chartignore` says.
-const ALWAYS_SKIPPED: [&str; 4] = [".git", ".jj", "node_modules", "target"];
-/// The chart's ignore file: one directory name per line, gitignore-style, `#` comments.
-const IGNORE_FILE: &str = ".chartignore";
+use crate::error::Error;
+use crate::ignores::IgnoreRules;
+use crate::schema::{NODE_FILE, Node, NodePath};
 
 /// A charted repository, anchored at the directory holding the root node.
 #[derive(Clone, Debug)]
@@ -23,6 +21,41 @@ pub struct LoadedNode {
     pub file: PathBuf,
     pub location: NodePath,
     pub node: Node,
+    /// Whether this node is the root of a tree mounted beneath the one being read.
+    pub is_mount: bool,
+}
+
+/// What a walk of the tree found: its own node files, and the mounts it stopped at.
+#[derive(Debug, Default)]
+pub struct Discovered {
+    /// Every `NODE.json` that belongs to this tree.
+    pub node_files: Vec<PathBuf>,
+    /// Directories beneath the root that hold a root node of their own: other trees, mounted
+    /// here. The walk does not descend into them.
+    pub mounts: Vec<PathBuf>,
+}
+
+/// The one field that makes a `NODE.json` a root; the rest of the file need not fit the schema.
+#[derive(Debug, Deserialize)]
+struct DeclaredPath {
+    path: NodePath,
+}
+
+impl LoadedNode {
+    /// This node as seen from a tree that mounts its own at `mount_point`: `location` and `path`
+    /// are rebased onto that tree's root, and the mounted tree's root node is marked as the mount.
+    pub fn mounted_at(self, mount_point: &NodePath) -> Self {
+        let is_mount = self.is_mount || self.location.is_root();
+        let location = self.location.mounted_at(mount_point);
+        let path = self.node.path.mounted_at(mount_point);
+        let node = Node { path, ..self.node };
+        Self {
+            file: self.file,
+            location,
+            node,
+            is_mount,
+        }
+    }
 }
 
 /// A `NODE.json` that could not be read or does not fit the schema.
@@ -52,11 +85,13 @@ impl Repo {
         })
     }
 
+    /// Whether `dir` holds a root node: a `NODE.json` declaring `path: "."`. Only `path` is read,
+    /// so a root that does not fit the schema is still a root — and is reported as one.
     fn holds_root_node(dir: &Path) -> bool {
         let Ok(text) = fs::read_to_string(dir.join(NODE_FILE)) else {
             return false;
         };
-        Node::parse(&text).is_ok_and(|node| node.path.is_root())
+        serde_json::from_str::<DeclaredPath>(&text).is_ok_and(|declared| declared.path.is_root())
     }
 
     pub fn root(&self) -> &Path {
@@ -94,29 +129,67 @@ impl Repo {
         Ok(dir)
     }
 
-    /// Every `NODE.json` beneath the root, skipping ignored directories.
-    pub fn node_files(&self) -> Result<Vec<PathBuf>, Error> {
-        let skipped = self.skipped_names()?;
-        let mut found = Vec::new();
-        collect_node_files(&self.root, &skipped, &mut found)?;
+    /// Walks the tree: every `NODE.json` beneath the root that belongs to it, and the mounts the
+    /// walk stopped at. Ignored directories are skipped (see [`IgnoreRules`]).
+    pub fn walk(&self) -> Result<Discovered, Error> {
+        let mut rules = IgnoreRules::default();
+        let mut found = Discovered::default();
+        self.collect(&self.root, &mut rules, &mut found)?;
         Ok(found)
     }
 
-    fn skipped_names(&self) -> Result<Vec<String>, Error> {
-        let mut names: Vec<String> = ALWAYS_SKIPPED.map(str::to_owned).to_vec();
-        let ignore_file = self.root.join(IGNORE_FILE);
-        if !ignore_file.exists() {
-            return Ok(names);
+    /// Every `NODE.json` of this tree — never a mounted tree's.
+    pub fn node_files(&self) -> Result<Vec<PathBuf>, Error> {
+        let found = self.walk()?;
+        Ok(found.node_files)
+    }
+
+    fn collect(
+        &self,
+        dir: &Path,
+        rules: &mut IgnoreRules,
+        found: &mut Discovered,
+    ) -> Result<(), Error> {
+        let listing = fs::read_dir(dir).map_err(|source| Error::io(dir, source))?;
+        let mut entries: Vec<fs::DirEntry> = listing
+            .collect::<Result<_, _>>()
+            .map_err(|source| Error::io(dir, source))?;
+        entries.sort_by_key(fs::DirEntry::file_name);
+        let holds_node = entries.iter().any(|entry| entry.file_name() == NODE_FILE);
+        let is_mount = holds_node && dir != self.root && Self::holds_root_node(dir);
+        if is_mount {
+            found.mounts.push(dir.to_path_buf());
+            return Ok(());
         }
-        let text =
-            fs::read_to_string(&ignore_file).map_err(|source| Error::io(&ignore_file, source))?;
-        let listed = text
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .map(|line| line.trim_matches('/').to_owned());
-        names.extend(listed);
-        Ok(names)
+        rules.enter(dir)?;
+        for entry in entries {
+            let kind = entry
+                .file_type()
+                .map_err(|source| Error::io(entry.path(), source))?;
+            if kind.is_dir() {
+                if rules.skips(&entry.path()) {
+                    continue;
+                }
+                self.collect(&entry.path(), rules, found)?;
+            } else if entry.file_name() == NODE_FILE {
+                found.node_files.push(entry.path());
+            }
+        }
+        rules.leave();
+        Ok(())
+    }
+
+    /// The tree mounted at `mount_point`, as a repository of its own.
+    pub fn mounted_tree(&self, mount_point: &NodePath) -> Self {
+        Self::at(mount_point.to_dir(&self.root))
+    }
+
+    /// The mount `path` belongs to: the deepest directory at or above it, strictly beneath the
+    /// root, that holds a root node. `None` for a path of this tree.
+    pub fn mount_holding(&self, path: &NodePath) -> Option<NodePath> {
+        std::iter::successors(Some(path.clone()), NodePath::parent)
+            .take_while(|location| !location.is_root())
+            .find(|location| Self::holds_root_node(&location.to_dir(&self.root)))
     }
 
     /// Reads one node file.
@@ -131,27 +204,45 @@ impl Repo {
             file: file.to_path_buf(),
             location,
             node,
+            is_mount: false,
         };
         Ok(loaded)
     }
 
-    /// Reads every node; the first unreadable file stops the run.
-    pub fn read_all(&self) -> Result<Vec<LoadedNode>, Error> {
-        self.node_files()?
+    /// Reads every node a reader sees: this tree's own, then each mounted tree's — mounts within
+    /// mounts included — rebased onto this root (see [`LoadedNode::mounted_at`]). A mounted tree
+    /// is read exactly as it reads from its own root. The first unreadable file stops the run.
+    pub fn read_across_mounts(&self) -> Result<Vec<LoadedNode>, Error> {
+        let found = self.walk()?;
+        let mut nodes: Vec<LoadedNode> = found
+            .node_files
             .iter()
             .map(|file| self.read(file))
-            .collect()
+            .collect::<Result<_, _>>()?;
+        for mount_dir in &found.mounts {
+            let mount_point = self.location_of(mount_dir)?;
+            let mounted_nodes = self.mounted_tree(&mount_point).read_across_mounts()?;
+            let rebased = mounted_nodes
+                .into_iter()
+                .map(|node| node.mounted_at(&mount_point));
+            nodes.extend(rebased);
+        }
+        Ok(nodes)
     }
 
-    /// Reads every node; an unreadable file is reported alongside the rest instead of stopping the run.
-    pub fn read_all_lenient(&self) -> Result<(Vec<LoadedNode>, Vec<Unreadable>), Error> {
+    /// Reads the given node files; an unreadable one is reported alongside the rest instead of
+    /// stopping the run.
+    pub fn read_lenient(
+        &self,
+        files: &[PathBuf],
+    ) -> Result<(Vec<LoadedNode>, Vec<Unreadable>), Error> {
         let mut loaded = Vec::new();
         let mut unreadable = Vec::new();
-        for file in self.node_files()? {
-            match self.read(&file) {
+        for file in files {
+            match self.read(file) {
                 Ok(node) => loaded.push(node),
                 Err(error) => {
-                    let location = self.location_of(&file)?;
+                    let location = self.location_of(file)?;
                     unreadable.push(Unreadable { location, error });
                 }
             }
@@ -169,32 +260,4 @@ impl Repo {
         fs::write(file, canonical).map_err(|source| Error::io(file, source))?;
         Ok(true)
     }
-}
-
-fn collect_node_files(
-    dir: &Path,
-    skipped: &[String],
-    found: &mut Vec<PathBuf>,
-) -> Result<(), Error> {
-    let listing = fs::read_dir(dir).map_err(|source| Error::io(dir, source))?;
-    let mut entries: Vec<fs::DirEntry> = listing
-        .collect::<Result<_, _>>()
-        .map_err(|source| Error::io(dir, source))?;
-    entries.sort_by_key(fs::DirEntry::file_name);
-    for entry in entries {
-        let name = entry.file_name();
-        let kind = entry
-            .file_type()
-            .map_err(|source| Error::io(entry.path(), source))?;
-        if kind.is_dir() {
-            let name = name.to_string_lossy();
-            if skipped.iter().any(|skip| *skip == name) {
-                continue;
-            }
-            collect_node_files(&entry.path(), skipped, found)?;
-        } else if name == NODE_FILE {
-            found.push(entry.path());
-        }
-    }
-    Ok(())
 }

@@ -9,6 +9,7 @@ pub mod check;
 pub mod cli;
 pub mod date;
 pub mod error;
+pub mod ignores;
 pub mod refindex;
 pub mod render;
 pub mod repo;

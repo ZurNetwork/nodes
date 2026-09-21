@@ -1,13 +1,14 @@
 //! `nodes check`: every rule a charted tree must satisfy, reported as findings.
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
 use crate::error::Error;
 use crate::refindex::RefIndex;
 use crate::repo::{LoadedNode, Repo};
-use crate::schema::{NodePath, PageId};
+use crate::schema::{NODE_FILE, NodePath, PageId};
 use crate::tree::NodeTree;
 
 /// How bad a finding is: errors fail the check, warnings do not.
@@ -30,6 +31,8 @@ pub struct Finding {
 #[derive(Debug, Serialize)]
 pub struct Report {
     pub nodes: usize,
+    /// The trees mounted beneath this one; only their root nodes were read.
+    pub mounts: usize,
     pub errors: usize,
     pub warnings: usize,
     pub findings: Vec<Finding>,
@@ -59,9 +62,17 @@ impl std::fmt::Display for Severity {
     }
 }
 
-/// Runs every rule over the repository.
+/// Runs every rule over the repository's own nodes. A mounted tree is another tree's business:
+/// only its root node is read, and its refs are never held against this tree's index.
 pub fn check(repo: &Repo, options: &CheckOptions) -> Result<Report, Error> {
-    let (loaded, unreadable) = repo.read_all_lenient()?;
+    let found = repo.walk()?;
+    let reached: BTreeSet<NodePath> = found
+        .node_files
+        .iter()
+        .chain(&found.mounts)
+        .map(|reached| repo.location_of(reached))
+        .collect::<Result<_, _>>()?;
+    let (loaded, unreadable) = repo.read_lenient(&found.node_files)?;
     let mut findings: Vec<Finding> = unreadable
         .into_iter()
         .map(|broken| Finding {
@@ -86,9 +97,12 @@ pub fn check(repo: &Repo, options: &CheckOptions) -> Result<Report, Error> {
         .transpose()?;
     for node in tree.iter() {
         check_path(node, &mut findings);
-        check_fs_children(repo, node, &mut findings);
-        check_listed_by_ancestor(&tree, node, &mut findings);
+        check_fs_children(repo, &reached, node, &mut findings);
+        check_listed_by_ancestor(&tree, &node.location, &mut findings);
         check_refs(node, ref_index.as_ref(), &mut findings);
+    }
+    for mount_dir in &found.mounts {
+        check_mount(repo, &tree, mount_dir, &mut findings)?;
     }
     let errors = findings
         .iter()
@@ -96,6 +110,7 @@ pub fn check(repo: &Repo, options: &CheckOptions) -> Result<Report, Error> {
         .count();
     let report = Report {
         nodes: tree.len(),
+        mounts: found.mounts.len(),
         errors,
         warnings: findings.len() - errors,
         findings,
@@ -116,8 +131,15 @@ fn check_path(node: &LoadedNode, findings: &mut Vec<Finding>) {
 }
 
 /// Every `fs` entry flagged `node: true` has a `NODE.json` at that path beneath this node — a nested
-/// name such as `src/account/` is allowed, so a pass-through directory need not carry a node of its own.
-fn check_fs_children(repo: &Repo, node: &LoadedNode, findings: &mut Vec<Finding>) {
+/// name such as `src/account/` is allowed, so a pass-through directory need not carry a node of its
+/// own — and the walk reaches it: a node that is hidden, ignored or inside a mount is no node of
+/// this tree, whatever `fs` says.
+fn check_fs_children(
+    repo: &Repo,
+    reached: &BTreeSet<NodePath>,
+    node: &LoadedNode,
+    findings: &mut Vec<Finding>,
+) {
     for entry in node.node.fs.iter().filter(|entry| entry.node) {
         let Ok(child) = node.location.join(&entry.name) else {
             let message = format!(
@@ -127,23 +149,48 @@ fn check_fs_children(repo: &Repo, node: &LoadedNode, findings: &mut Vec<Finding>
             findings.push(error(node, message));
             continue;
         };
-        if repo.node_file(&child).is_file() {
+        if reached.contains(&child) {
             continue;
         }
-        let message = format!(
-            "fs entry `{}` says node: true but `{}` has no NODE.json",
-            entry.name, child
-        );
+        let mount_above = repo.mount_holding(&child).filter(|mount| *mount != child);
+        let why_not = if !repo.node_file(&child).is_file() {
+            format!("`{child}` has no NODE.json")
+        } else if let Some(mount) = mount_above {
+            format!("`{child}` belongs to the tree mounted at `{mount}`")
+        } else {
+            format!(
+                "`{child}` is hidden or ignored — re-include it with a `!` line in .chartignore, or say node: false"
+            )
+        };
+        let message = format!("fs entry `{}` says node: true but {why_not}", entry.name);
         findings.push(error(node, message));
     }
 }
 
-/// A node directly beneath another node is listed in that node's `fs` with `node: true`.
-fn check_listed_by_ancestor(tree: &NodeTree, node: &LoadedNode, findings: &mut Vec<Finding>) {
-    let Some(ancestor) = tree.nearest_ancestor(&node.location) else {
+/// A mount's root node fits the schema, and its parent lists it like any other child node. Nothing
+/// beneath the mount's root is read.
+fn check_mount(
+    repo: &Repo,
+    tree: &NodeTree,
+    mount_dir: &Path,
+    findings: &mut Vec<Finding>,
+) -> Result<(), Error> {
+    let mount_point = repo.location_of(mount_dir)?;
+    let root_file = mount_dir.join(NODE_FILE);
+    if let Err(unreadable) = repo.read(&root_file) {
+        let finding = error_at(&mount_point, unreadable.to_string());
+        findings.push(finding);
+    }
+    check_listed_by_ancestor(tree, &mount_point, findings);
+    Ok(())
+}
+
+/// A node — or a mount — directly beneath another node is listed in that node's `fs` with `node: true`.
+fn check_listed_by_ancestor(tree: &NodeTree, location: &NodePath, findings: &mut Vec<Finding>) {
+    let Some(ancestor) = tree.nearest_ancestor(location) else {
         return;
     };
-    let Some(below) = ancestor.location.relative(&node.location) else {
+    let Some(below) = ancestor.location.relative(location) else {
         return;
     };
     let is_direct_child = !below.contains('/');
@@ -163,7 +210,7 @@ fn check_listed_by_ancestor(tree: &NodeTree, node: &LoadedNode, findings: &mut V
         ),
         None => format!("not listed in `{}`'s fs", ancestor.location),
     };
-    findings.push(error(node, message));
+    findings.push(error_at(location, message));
 }
 
 /// Refs cite each page once, and — given an index — only pages it lists; a superseded entry warns.
@@ -199,9 +246,13 @@ fn check_refs(node: &LoadedNode, index: Option<&RefIndex>, findings: &mut Vec<Fi
 }
 
 fn error(node: &LoadedNode, message: String) -> Finding {
+    error_at(&node.location, message)
+}
+
+fn error_at(path: &NodePath, message: String) -> Finding {
     Finding {
         severity: Severity::Error,
-        path: node.location.clone(),
+        path: path.clone(),
         message,
     }
 }
