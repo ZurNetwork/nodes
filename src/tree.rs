@@ -1,6 +1,6 @@
 //! The loaded node tree: lookup by path, ancestor chains, children and citations.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::repo::LoadedNode;
 use crate::schema::{NodePath, PageId, Ref};
@@ -9,6 +9,26 @@ use crate::schema::{NodePath, PageId, Ref};
 #[derive(Debug, Default)]
 pub struct NodeTree {
     nodes: BTreeMap<NodePath, LoadedNode>,
+}
+
+/// The part of a tree a filtered drawing keeps: the nodes that match, and the ancestors that only
+/// lead to them.
+#[derive(Debug)]
+pub struct Pruned {
+    matched: BTreeSet<NodePath>,
+    drawn: BTreeSet<NodePath>,
+}
+
+impl Pruned {
+    /// Whether the node at `path` is drawn at all: a match, or an ancestor of one.
+    pub fn draws(&self, path: &NodePath) -> bool {
+        self.drawn.contains(path)
+    }
+
+    /// Whether the node at `path` is itself a match — an ancestor that only leads to one is not.
+    pub fn matches(&self, path: &NodePath) -> bool {
+        self.matched.contains(path)
+    }
 }
 
 impl NodeTree {
@@ -46,6 +66,18 @@ impl NodeTree {
         self.iter()
             .filter(|node| node.location.relative(target).is_some())
             .collect()
+    }
+
+    /// The tree pruned to the nodes `admits` keeps, plus the chain of ancestors above each.
+    pub fn pruned_to(&self, admits: impl Fn(&LoadedNode) -> bool) -> Pruned {
+        let matching: Vec<&LoadedNode> = self.iter().filter(|node| admits(node)).collect();
+        let matched = matching.iter().map(|node| node.location.clone()).collect();
+        let drawn = matching
+            .iter()
+            .flat_map(|node| self.chain(&node.location))
+            .map(|node| node.location.clone())
+            .collect();
+        Pruned { matched, drawn }
     }
 
     /// The closest node strictly above `path`.

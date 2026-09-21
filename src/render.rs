@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use crate::repo::LoadedNode;
 use crate::schema::{Category, Field, FsEntry, Node, NodeType, Ref};
-use crate::tree::NodeTree;
+use crate::tree::{NodeTree, Pruned};
 
 /// The whole node, every field labelled.
 pub fn node_text(node: &Node) -> String {
@@ -75,19 +75,31 @@ pub fn ls_text(nodes: &[&LoadedNode]) -> String {
 
 /// The tree from the root, drawn with box connectors; each line names the node relative to its
 /// parent node (so a node two directories down reads `api/v1`) and gives its `short`. The root of
-/// a mounted tree is tagged `[mount]`.
-pub fn tree_text(tree: &NodeTree) -> String {
+/// a mounted tree is tagged `[mount]`. Only what `pruned` draws appears, and an ancestor that
+/// merely leads to a match is drawn bare — no `short` — so the matches stand out.
+pub fn tree_text(tree: &NodeTree, pruned: &Pruned) -> String {
     let mut text = String::new();
-    let Some(root) = tree.root() else {
+    let drawn_root = tree.root().filter(|root| pruned.draws(&root.location));
+    let Some(root) = drawn_root else {
         return text;
     };
-    let _ = writeln!(text, "{}  {}", root.location, root.node.short);
-    push_children(&mut text, tree, root, "");
+    let _ = writeln!(text, "{}{}", root.location, short_tail(root, pruned));
+    push_children(&mut text, tree, pruned, root, "");
     text
 }
 
-fn push_children(text: &mut String, tree: &NodeTree, parent: &LoadedNode, prefix: &str) {
-    let children = tree.children(&parent.location);
+fn push_children(
+    text: &mut String,
+    tree: &NodeTree,
+    pruned: &Pruned,
+    parent: &LoadedNode,
+    prefix: &str,
+) {
+    let children: Vec<&LoadedNode> = tree
+        .children(&parent.location)
+        .into_iter()
+        .filter(|child| pruned.draws(&child.location))
+        .collect();
     let count = children.len();
     for (index, child) in children.into_iter().enumerate() {
         let last = index + 1 == count;
@@ -99,12 +111,21 @@ fn push_children(text: &mut String, tree: &NodeTree, parent: &LoadedNode, prefix
         let mount_tag = if child.is_mount { "  [mount]" } else { "" };
         let _ = writeln!(
             text,
-            "{prefix}{connector}{name}{mount_tag}  {}",
-            child.node.short
+            "{prefix}{connector}{name}{mount_tag}{}",
+            short_tail(child, pruned)
         );
         let deeper = if last { "    " } else { "│   " };
         let child_prefix = format!("{prefix}{deeper}");
-        push_children(text, tree, child, &child_prefix);
+        push_children(text, tree, pruned, child, &child_prefix);
+    }
+}
+
+/// What follows a node's name on its line: its `short` for a match, nothing for a bare ancestor.
+fn short_tail(node: &LoadedNode, pruned: &Pruned) -> String {
+    if pruned.matches(&node.location) {
+        format!("  {}", node.node.short)
+    } else {
+        String::new()
     }
 }
 

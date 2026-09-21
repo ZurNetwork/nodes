@@ -1011,3 +1011,76 @@ fn classify_migrates_a_node_written_before_the_fields_existed() {
         "{stderr}"
     );
 }
+
+#[test]
+fn a_filtered_tree_keeps_the_matches_and_the_ancestors_that_lead_to_them() {
+    let repo = TempRepo::charted();
+    let frontend = classified(&repo.read("frontend/NODE.json"), "code", &["ui", "source"]);
+    repo.write("frontend/NODE.json", &frontend);
+    let crates = classified(
+        &repo.read("backend/crates/NODE.json"),
+        "document",
+        &["docs", "ui"],
+    );
+    repo.write("backend/crates/NODE.json", &crates);
+    let by_category = "\
+.
+├── backend
+│   └── crates  Twelve crates in a hexagon
+└── frontend  The client tier
+";
+    assert_eq!(
+        repo.ok(&["tree", "--category", "ui"]),
+        by_category,
+        "a match carries its `short`; an ancestor that only leads to one is bare"
+    );
+    let by_type = "\
+.
+└── backend
+    └── crates  Twelve crates in a hexagon
+";
+    assert_eq!(repo.ok(&["tree", "--type", "document"]), by_type);
+    let both = "\
+.  The whole repository
+├── backend  The backend
+└── frontend  The client tier
+";
+    assert_eq!(
+        repo.ok(&["tree", "--type", "code", "--category", "source"]),
+        both
+    );
+    assert_eq!(repo.ok(&["tree", "--category", "finance"]), "");
+    let filtered: Value =
+        serde_json::from_str(&repo.ok(&["--json", "tree", "--category", "ui"])).expect("json");
+    assert_eq!(filtered["match"], false);
+    assert_eq!(filtered["children"].as_array().expect("children").len(), 2);
+    assert_eq!(filtered["children"][0]["path"], "backend");
+    assert_eq!(filtered["children"][0]["match"], false);
+    assert_eq!(filtered["children"][0]["children"][0]["match"], true);
+    assert_eq!(filtered["children"][1]["match"], true);
+    let nothing: Value =
+        serde_json::from_str(&repo.ok(&["--json", "tree", "--category", "finance"])).expect("json");
+    assert_eq!(nothing, Value::Null);
+    let unfiltered: Value = serde_json::from_str(&repo.ok(&["--json", "tree"])).expect("json");
+    assert!(
+        unfiltered.get("match").is_none(),
+        "an unfiltered tree keeps its shape"
+    );
+}
+
+#[test]
+fn a_filtered_tree_reaches_into_mounts() {
+    let repo = TempRepo::mounting();
+    let housing = classified(
+        &repo.read("life/housing/NODE.json"),
+        "document",
+        &["housing", "legal"],
+    );
+    repo.write("life/housing/NODE.json", &housing);
+    let drawn = "\
+.
+└── life  [mount]
+    └── housing  Lease and utilities
+";
+    assert_eq!(repo.ok(&["tree", "--category", "legal"]), drawn);
+}

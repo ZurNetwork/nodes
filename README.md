@@ -63,7 +63,7 @@ A tree charted before v0.4.0 is migrated node by node with `nodes classify <path
 
 | Command | Does |
 |---|---|
-| `nodes tree` | the whole tree, drawn: each node's name + `short` |
+| `nodes tree [--type T] [--category C]` | the whole tree, drawn: each node's name + `short`; filtered, the matches plus the bare ancestors that lead to them |
 | `nodes ls [--type T] [--category C]` | every node, one line each: path + `short`; `--category` lists best fit first |
 | `nodes chain <path>` | root → … → node: what to read to understand a path |
 | `nodes get <path> [field]` | one node, or one field of it |
@@ -90,6 +90,16 @@ $ nodes tree
 └── contract  The protobuf API contract, authoritative over both tiers
     └── zurfur  Pass-through to api/v1
         └── api/v1  The v1 proto corpus
+```
+
+A filtered tree keeps each match and the ancestors above it; an ancestor that only leads to a match is drawn bare, without its `short` (and `--json` entries gain `"match": true|false`):
+
+```
+$ nodes --root ~ tree --category finance
+.
+└── Life  [mount]
+    ├── 20 Money  invoices, receipts, taxes, tuition, bank letters
+    └── 30 Housing  one folder per home
 ```
 
 A node beneath a pass-through directory is named by its path from the parent node (`api/v1`). `--json` keeps full paths (`{path, mount, type, categories, short, is, children}`).
