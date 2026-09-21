@@ -1,5 +1,6 @@
-//! Which directories the walk stays out of: gitignore rules read from `.gitignore` and
-//! `.chartignore` at every level, plus hidden directories and a few names that are never charted.
+//! What the walk stays out of: gitignore rules read from `.gitignore` and `.chartignore` at every
+//! level, plus hidden names and a few directories that are never charted. Directories are judged
+//! by every walk; files only by the walks that read content (`grep`, `recent`, `resolve`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -39,11 +40,22 @@ impl IgnoreRules {
     /// precedence; with no opinion anywhere, a hidden directory is skipped, so a `!.name/` line is
     /// what brings one back.
     pub fn skips(&self, dir: &Path) -> bool {
-        let name = dir.file_name().map(|name| name.to_string_lossy());
+        self.excludes(dir, true)
+    }
+
+    /// Whether a walk over content passes `file` by: the same precedence as [`Self::skips`], a
+    /// hidden file skipped unless a `!.name` line brings it back. A pattern ending in `/` judges
+    /// directories only, as in git.
+    pub fn skips_file(&self, file: &Path) -> bool {
+        self.excludes(file, false)
+    }
+
+    fn excludes(&self, path: &Path, is_dir: bool) -> bool {
+        let name = path.file_name().map(|name| name.to_string_lossy());
         let Some(name) = name else {
             return false;
         };
-        if ALWAYS_SKIPPED.contains(&name.as_ref()) {
+        if is_dir && ALWAYS_SKIPPED.contains(&name.as_ref()) {
             return true;
         }
         let verdict = self
@@ -51,7 +63,7 @@ impl IgnoreRules {
             .iter()
             .rev()
             .flatten()
-            .map(|layer| layer.matched(dir, true))
+            .map(|layer| layer.matched(path, is_dir))
             .find(|verdict| !verdict.is_none());
         match verdict {
             Some(Match::Ignore(_)) => true,
@@ -99,5 +111,32 @@ mod tests {
         assert!(rules.skips(Path::new("/repo/backend/target")));
         assert!(rules.skips(Path::new("/repo/node_modules")));
         assert!(!rules.skips(Path::new("/repo/backend")));
+    }
+
+    #[test]
+    fn files_are_judged_by_the_same_rules_except_the_directory_only_ones() {
+        let mut builder = GitignoreBuilder::new("/repo");
+        for line in ["*.log", "generated/", "!.keep"] {
+            builder.add_line(None, line).expect("a pattern");
+        }
+        let layer = builder.build().expect("rules");
+        let rules = IgnoreRules {
+            layers: vec![Some(layer)],
+        };
+        assert!(rules.skips_file(Path::new("/repo/backend/server.log")));
+        assert!(rules.skips_file(Path::new("/repo/.env")), "hidden");
+        assert!(
+            !rules.skips_file(Path::new("/repo/.keep")),
+            "a `!.name` line brings a hidden file back"
+        );
+        assert!(
+            !rules.skips_file(Path::new("/repo/generated")),
+            "a pattern ending in `/` judges directories only"
+        );
+        assert!(rules.skips(Path::new("/repo/generated")));
+        assert!(
+            !rules.skips_file(Path::new("/repo/target")),
+            "the never-charted names are directories"
+        );
     }
 }

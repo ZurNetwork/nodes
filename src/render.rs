@@ -146,8 +146,11 @@ fn tag_words(node: &Node) -> Vec<String> {
         .collect()
 }
 
+/// What follows a name that carries its own `NODE.json`.
+pub const NODE_MARKER: &str = "  [node]";
+
 fn fs_line(entry: &FsEntry) -> String {
-    let marker = if entry.node { "  [node]" } else { "" };
+    let marker = if entry.node { NODE_MARKER } else { "" };
     format!("{}  {}{marker}", entry.name, entry.role)
 }
 

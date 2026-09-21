@@ -1,5 +1,6 @@
 //! Where nodes live on disk: root discovery, file discovery, reading and writing.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -33,6 +34,68 @@ pub struct Discovered {
     /// Directories beneath the root that hold a root node of their own: other trees, mounted
     /// here. The walk does not descend into them.
     pub mounts: Vec<PathBuf>,
+    /// The content files a walk over content kept; none for a walk over the chart alone.
+    files: Vec<PathBuf>,
+    /// Whether a walk over content reached the directory it was asked about.
+    reached_start: bool,
+}
+
+/// How far a walk reaches beyond the chart itself.
+#[derive(Clone, Copy, Debug)]
+enum Reach<'a> {
+    /// Node files only: what every command over the chart needs.
+    Nodes,
+    /// Also the content files at or beneath this directory. The walk is narrowed to the way
+    /// there, so the ignore files above it still speak and nothing beside it is listed.
+    FilesWithin(&'a Path),
+}
+
+impl Reach<'_> {
+    /// Whether the walk has business in `dir`.
+    fn enters(self, dir: &Path) -> bool {
+        match self {
+            Self::Nodes => true,
+            Self::FilesWithin(start) => dir.starts_with(start) || start.starts_with(dir),
+        }
+    }
+
+    /// Whether `file` is content the walk keeps. A `NODE.json` never is: it is the chart.
+    fn keeps(self, file: &Path) -> bool {
+        match self {
+            Self::Nodes => false,
+            Self::FilesWithin(start) => file.starts_with(start),
+        }
+    }
+
+    fn starts_at(self, dir: &Path) -> bool {
+        matches!(self, Self::FilesWithin(start) if start == dir)
+    }
+}
+
+/// The content beneath a directory, across mounts: every regular file that is not a `NODE.json`
+/// and that no ignore rule passes by, sorted — and the directories that hold a node, so each file
+/// can be given to the node that owns it.
+#[derive(Debug, Default)]
+pub struct Content {
+    pub files: Vec<PathBuf>,
+    node_dirs: BTreeSet<PathBuf>,
+    /// Whether the walk reached the directory it was asked about; an ignored one is never reached.
+    pub reached: bool,
+}
+
+impl Content {
+    /// The directory of the node that owns `file`: the deepest one above it holding a `NODE.json`.
+    pub fn owner_of(&self, file: &Path) -> Option<&Path> {
+        file.ancestors()
+            .skip(1)
+            .find_map(|dir| self.node_dirs.get(dir))
+            .map(PathBuf::as_path)
+    }
+
+    /// Every directory the walk found a node in.
+    pub fn node_dirs(&self) -> impl Iterator<Item = &Path> {
+        self.node_dirs.iter().map(PathBuf::as_path)
+    }
 }
 
 /// The one field that makes a `NODE.json` a root; the rest of the file need not fit the schema.
@@ -134,8 +197,37 @@ impl Repo {
     pub fn walk(&self) -> Result<Discovered, Error> {
         let mut rules = IgnoreRules::default();
         let mut found = Discovered::default();
-        self.collect(&self.root, &mut rules, &mut found)?;
+        self.collect(&self.root, Reach::Nodes, &mut rules, &mut found)?;
         Ok(found)
+    }
+
+    /// The content at or beneath `start` (see [`Content`]): this tree's, then each mounted tree's
+    /// — mounts within mounts included. A mounted tree is walked exactly as from its own root,
+    /// under its own ignore files. Paths stay absolute; the caller names them from its own root.
+    pub fn content_across_mounts(&self, start: &Path) -> Result<Content, Error> {
+        let mut rules = IgnoreRules::default();
+        let mut found = Discovered::default();
+        let reach = Reach::FilesWithin(start);
+        self.collect(&self.root, reach, &mut rules, &mut found)?;
+        let node_dirs = found
+            .node_files
+            .iter()
+            .filter_map(|file| file.parent())
+            .map(Path::to_path_buf)
+            .collect();
+        let mut content = Content {
+            files: found.files,
+            node_dirs,
+            reached: found.reached_start,
+        };
+        for mount_dir in found.mounts {
+            let mounted = Self::at(mount_dir).content_across_mounts(start)?;
+            content.files.extend(mounted.files);
+            content.node_dirs.extend(mounted.node_dirs);
+            content.reached |= mounted.reached;
+        }
+        content.files.sort();
+        Ok(content)
     }
 
     /// Every `NODE.json` of this tree — never a mounted tree's.
@@ -147,6 +239,7 @@ impl Repo {
     fn collect(
         &self,
         dir: &Path,
+        reach: Reach<'_>,
         rules: &mut IgnoreRules,
         found: &mut Discovered,
     ) -> Result<(), Error> {
@@ -161,18 +254,25 @@ impl Repo {
             found.mounts.push(dir.to_path_buf());
             return Ok(());
         }
+        if reach.starts_at(dir) {
+            found.reached_start = true;
+        }
         rules.enter(dir)?;
         for entry in entries {
+            let path = entry.path();
             let kind = entry
                 .file_type()
-                .map_err(|source| Error::io(entry.path(), source))?;
+                .map_err(|source| Error::io(&path, source))?;
             if kind.is_dir() {
-                if rules.skips(&entry.path()) {
+                if rules.skips(&path) || !reach.enters(&path) {
                     continue;
                 }
-                self.collect(&entry.path(), rules, found)?;
+                self.collect(&path, reach, rules, found)?;
             } else if entry.file_name() == NODE_FILE {
-                found.node_files.push(entry.path());
+                // The chart is found whatever the ignore files say about files.
+                found.node_files.push(path);
+            } else if kind.is_file() && reach.keeps(&path) && !rules.skips_file(&path) {
+                found.files.push(path);
             }
         }
         rules.leave();

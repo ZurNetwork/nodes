@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
@@ -169,6 +170,17 @@ impl TempRepo {
         let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
         let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
         (stdout, stderr)
+    }
+
+    /// Pins a file's modification time, in whole seconds since the epoch.
+    fn modified_at(&self, relative: &str, seconds_since_epoch: u64) {
+        let file = fs::File::options()
+            .write(true)
+            .open(self.root.join(relative))
+            .expect("opens for writing");
+        let instant = UNIX_EPOCH + Duration::from_secs(seconds_since_epoch);
+        file.set_modified(instant)
+            .expect("sets the modification time");
     }
 
     fn index_arg(&self) -> String {
@@ -1247,4 +1259,189 @@ fn a_filtered_tree_reaches_into_mounts() {
     └── housing  Lease and utilities
 ";
     assert_eq!(repo.ok(&["tree", "--category", "legal"]), drawn);
+}
+
+#[test]
+fn grep_searches_file_contents_and_names_the_owning_node() {
+    let repo = TempRepo::charted();
+    repo.write(
+        "backend/crates/api/src/lib.rs",
+        "fn main() {\n    serve();\n    // TODO: Graceful Shutdown\n    // graceful, again\n}\n",
+    );
+    let both_lines = "\
+backend/crates  backend/crates/api/src/lib.rs:3: // TODO: Graceful Shutdown
+backend/crates  backend/crates/api/src/lib.rs:4: // graceful, again
+";
+    assert_eq!(
+        repo.ok(&["grep", "GRACEFUL"]),
+        both_lines,
+        "the node that owns a file is the deepest one above it"
+    );
+    assert_eq!(
+        repo.ok(&["grep", "index built"]),
+        ".  docs/index.md:1: # Index built 2026-06-30\n"
+    );
+    assert_eq!(
+        repo.ok(&["grep", "hexagon"]),
+        "",
+        "NODE.json is the chart: find searches it, grep does not"
+    );
+    assert_eq!(
+        repo.ok(&["grep", "graceful", "--limit", "1"]),
+        "backend/crates  backend/crates/api/src/lib.rs:3: // TODO: Graceful Shutdown\n"
+    );
+    let hits: Value = serde_json::from_str(&repo.ok(&["--json", "grep", "again"])).expect("json");
+    let expected_hits = json!([{
+        "path": "backend/crates",
+        "file": "backend/crates/api/src/lib.rs",
+        "line": 4,
+        "text": "// graceful, again",
+    }]);
+    assert_eq!(hits, expected_hits);
+    let (_, stderr) = repo.fails(&["grep", ""]);
+    assert!(
+        stderr.contains("an empty term matches every line"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn grep_stays_out_of_ignored_hidden_and_binary_files() {
+    let repo = TempRepo::charted();
+    repo.write(".chartignore", "*.log\n/frontend/\n");
+    repo.write("server.log", "a needle here\n");
+    repo.write("frontend/app.ts", "a needle here\n");
+    repo.write(".env", "NEEDLE=1\n");
+    repo.write("docs/blob.bin", "a needle\0here\n");
+    repo.write("docs/notes.md", "a needle here\n");
+    repo.write("docs/huge.txt", &"needle\n".repeat(1_300_000));
+    let output = repo.nodes(&["grep", "needle"]);
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        ".  docs/notes.md:1: a needle here\n"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr, "nodes: passed over docs/huge.txt: 9100000 bytes, more than grep reads (8388608)\n",
+        "a file too large to search is said so; a binary or ignored one is not worth a word"
+    );
+}
+
+#[test]
+fn grep_crosses_a_mount_under_the_mounts_own_ignore_files() {
+    let repo = TempRepo::mounting();
+    repo.write("life/.chartignore", "scans/\n");
+    repo.write("life/housing/lease.md", "The deposit is two months.\n");
+    repo.write("life/scans/lease.txt", "deposit\n");
+    repo.write("life/archive/2019/taxes.md", "No deposit that year.\n");
+    let across_mounts = "\
+life/archive/2019  life/archive/2019/taxes.md:1: No deposit that year.
+life/housing  life/housing/lease.md:1: The deposit is two months.
+";
+    assert_eq!(repo.ok(&["grep", "deposit"]), across_mounts);
+}
+
+#[test]
+fn recent_lists_the_newest_files_first_and_ties_by_name() {
+    let repo = TempRepo::charted();
+    repo.write("backend/crates/api/src/lib.rs", "");
+    repo.write("frontend/b.ts", "");
+    repo.write("frontend/app.ts", "");
+    repo.modified_at("docs/index.md", 1_789_257_600);
+    repo.modified_at("frontend/app.ts", 1_789_300_800);
+    repo.modified_at("frontend/b.ts", 1_789_300_800);
+    repo.modified_at("backend/crates/api/src/lib.rs", 1_789_912_991);
+    let newest_first = "\
+2026-09-20T14:03:11Z  backend/crates/api/src/lib.rs
+2026-09-13T12:00:00Z  frontend/app.ts
+2026-09-13T12:00:00Z  frontend/b.ts
+2026-09-13T00:00:00Z  docs/index.md
+";
+    assert_eq!(
+        repo.ok(&["recent"]),
+        newest_first,
+        "NODE.json files are the chart, not content: a charting run does not flood the list"
+    );
+    assert_eq!(
+        repo.ok(&["recent", "--limit", "1"]),
+        "2026-09-20T14:03:11Z  backend/crates/api/src/lib.rs\n"
+    );
+    let beneath_frontend = "\
+2026-09-13T12:00:00Z  frontend/app.ts
+2026-09-13T12:00:00Z  frontend/b.ts
+";
+    assert_eq!(repo.ok(&["recent", "frontend"]), beneath_frontend);
+    let listed: Value =
+        serde_json::from_str(&repo.ok(&["--json", "recent", "--limit", "1"])).expect("json");
+    let expected_listing = json!([{
+        "path": "backend/crates",
+        "file": "backend/crates/api/src/lib.rs",
+        "modified": "2026-09-20T14:03:11Z",
+    }]);
+    assert_eq!(listed, expected_listing);
+}
+
+#[test]
+fn recent_refuses_a_path_that_is_ignored_or_no_directory() {
+    let repo = TempRepo::charted();
+    repo.write(".chartignore", "/frontend/\n");
+    repo.write("frontend/app.ts", "");
+    let (_, stderr) = repo.fails(&["recent", "frontend"]);
+    assert_eq!(
+        stderr, "nodes: `frontend`: ignored: the walk never reaches it\n",
+        "an empty list would read as: nothing changed"
+    );
+    let (_, stderr) = repo.fails(&["recent", "docs/index.md"]);
+    assert_eq!(stderr, "nodes: `docs/index.md`: not a directory\n");
+    let (_, stderr) = repo.fails(&["recent", "nowhere"]);
+    assert_eq!(stderr, "nodes: `nowhere`: not a directory\n");
+    let (_, stderr) = repo.fails(&["recent", "--limit", "0"]);
+    assert!(
+        stderr.contains("`0` is not a limit: a whole number from 1 up"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn resolve_ranks_exact_partial_and_slightly_off_names() {
+    let repo = TempRepo::charted();
+    repo.write("backend/crates/api/src/lib.rs", "");
+    let exact_name_first = "\
+backend/crates  [node]
+backend/crates/api/src/lib.rs
+";
+    assert_eq!(
+        repo.ok(&["resolve", "crates"]),
+        exact_name_first,
+        "a node is marked; a path that merely holds the name trails the one that ends in it"
+    );
+    assert_eq!(
+        repo.ok(&["resolve", "crates", "--limit", "1"]),
+        "backend/crates  [node]\n"
+    );
+    assert_eq!(
+        repo.ok(&["resolve", "frotnend"]),
+        "frontend  [node]\n",
+        "two neighbours transposed"
+    );
+    assert_eq!(
+        repo.ok(&["resolve", "indx"]),
+        "docs/index.md\n",
+        "a dropped character, measured against the name without its extension"
+    );
+    assert_eq!(repo.ok(&["resolve", "zzz"]), "");
+    let resolved: Value =
+        serde_json::from_str(&repo.ok(&["--json", "resolve", "crates", "--limit", "1"]))
+            .expect("json");
+    let expected_candidate = json!([{"path": "backend/crates", "kind": "node", "score": 900}]);
+    assert_eq!(resolved, expected_candidate);
+    let (_, stderr) = repo.fails(&["resolve", ""]);
+    assert_eq!(stderr, "nodes: query ``: nothing to resolve\n");
+    let mounting = TempRepo::mounting();
+    assert_eq!(
+        mounting.ok(&["resolve", "housing"]),
+        "life/housing  [node]\n",
+        "a mounted tree's paths are rebased onto the outer root"
+    );
 }
