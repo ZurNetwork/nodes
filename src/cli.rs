@@ -13,9 +13,8 @@ use crate::error::Error;
 use crate::refindex::DEFAULT_SUPERSEDED_MARKER;
 use crate::render;
 use crate::repo::{LoadedNode, Repo};
-use crate::schema::{
-    Category, ChartedDate, Field, NODE_FILE, Node, NodePath, NodeType, PageId, Ref,
-};
+use crate::schema::{ChartedDate, Field, NODE_FILE, Node, NodePath, NodeType, PageId, Ref, Tag};
+use crate::tag::MalformedTag;
 use crate::tree::{NodeTree, Pruned};
 
 /// NODE.json normalizer and lookup.
@@ -48,12 +47,12 @@ pub enum Command {
     /// One node, or one field of it.
     Get {
         path: String,
-        /// path, charted, short, is, type, categories, conventions, entry_points, fs, refs or notes.
+        /// path, charted, short, is, type, tags, conventions, entry_points, fs, refs or notes.
         field: Option<Field>,
     },
     /// Every node citing a page.
     Refs { page: PageId },
-    /// Case-insensitive search over `short`, `is`, `type`, `categories`, `fs[].role`, `conventions`, `notes`, `refs[].title` and `refs[].governs`.
+    /// Case-insensitive search over `short`, `is`, `type`, `tags`, `fs[].role`, `conventions`, `notes`, `refs[].title` and `refs[].governs`.
     Find { term: String },
     /// Normalize NODE.json files in place (default: every one in the repository).
     Fmt {
@@ -77,16 +76,20 @@ pub enum Command {
     },
     /// Remove the ref citing a page.
     RmRef { path: String, page: PageId },
-    /// Set `type` and `categories` together — also on a file written before they existed.
+    /// Set `type` and the `category:` tags together — also on a file written before they existed.
+    /// The node's other tags are kept, after the categories.
     Classify {
         path: String,
         /// The one broad kind that fits best (see `nodes vocabulary`).
         node_type: NodeType,
-        /// What the directory specifically holds, most fitting first.
-        #[arg(required = true)]
-        categories: Vec<Category>,
+        /// What the directory specifically holds, most fitting first: `ui` is tagged `category:ui`.
+        #[arg(required = true, value_name = "CATEGORY", value_parser = category_tag)]
+        categories: Vec<Tag>,
     },
-    /// The closed vocabularies of `type` and `categories`, each term with its meaning.
+    /// Rewrite every node written before `tags` existed (up to v0.5): its ranked `categories`
+    /// become `category:` tags. Also normalizes, like `fmt`; a second run changes nothing.
+    Migrate,
+    /// The closed vocabulary of `type`, each term with its meaning.
     Vocabulary,
     /// Set `charted` to today (UTC), or to --date.
     Touch {
@@ -96,31 +99,48 @@ pub enum Command {
     },
 }
 
-/// Which nodes a listing keeps: by type, by category, both, or — with neither — all.
+/// Which nodes a listing keeps: by type, by tags, both, or — with neither — all.
 #[derive(Debug, Args)]
 pub struct Selection {
-    /// Only nodes carrying this category; `ls` lists them best fit first (by its rank in each node's list).
-    #[arg(long, value_name = "CATEGORY")]
-    pub category: Option<Category>,
+    /// Only nodes carrying this tag (`word` or `namespace:word`); repeat it to require several.
+    #[arg(long = "tag", value_name = "TAG")]
+    pub tags: Vec<Tag>,
+    /// Only nodes carrying `category:CATEGORY` — short for `--tag category:CATEGORY`. `ls` lists
+    /// them best fit first (by the category's rank among each node's categories).
+    #[arg(long, value_name = "CATEGORY", value_parser = category_tag)]
+    pub category: Option<Tag>,
     /// Only nodes of this type.
     #[arg(long = "type", value_name = "TYPE")]
     pub node_type: Option<NodeType>,
 }
 
 impl Selection {
+    /// Every tag a node must carry, `--category` first.
+    fn selected_tags(&self) -> impl Iterator<Item = &Tag> {
+        self.category.iter().chain(&self.tags)
+    }
+
     fn is_everything(&self) -> bool {
-        self.category.is_none() && self.node_type.is_none()
+        self.node_type.is_none() && self.selected_tags().next().is_none()
     }
 
     fn admits(&self, node: &Node) -> bool {
         let type_fits = self
             .node_type
             .is_none_or(|node_type| node.node_type == node_type);
-        let category_fits = self
-            .category
-            .is_none_or(|category| node.categories.rank_of(category).is_some());
-        type_fits && category_fits
+        let tags_fit = self.selected_tags().all(|tag| node.tags.carries(tag));
+        type_fits && tags_fit
     }
+
+    /// The category `ls` ranks by: the first one selected, however it was spelled.
+    fn ranking_category(&self) -> Option<&Tag> {
+        self.selected_tags().find(|tag| tag.is_category())
+    }
+}
+
+/// A category word as the tag it stands for: `ui` is `category:ui`.
+fn category_tag(word: &str) -> Result<Tag, MalformedTag> {
+    Tag::category(word)
 }
 
 #[derive(Debug, Args)]
@@ -195,6 +215,7 @@ pub fn run(cli: Cli) -> Result<ExitCode, Error> {
             node_type,
             categories,
         } => classify(&repo, &path, node_type, &categories, output),
+        Command::Migrate => migrate(&repo, output),
         Command::Tree(selection) => tree(&repo, &selection, output),
         Command::Ls(selection) => ls(&repo, &selection, output),
         Command::Chain { path } => chain(&repo, &path, output),
@@ -304,7 +325,7 @@ fn subtree_json(
         .filter(|child| pruned.draws(&child.location))
         .map(|child| subtree_json(tree, pruned, selection, child))
         .collect();
-    let mut entry = json!({ "path": node.location, "mount": node.is_mount, "type": node.node.node_type, "categories": node.node.categories, "short": node.node.short, "is": node.node.is, "children": children });
+    let mut entry = json!({ "path": node.location, "mount": node.is_mount, "type": node.node.node_type, "tags": node.node.tags, "short": node.node.short, "is": node.node.is, "children": children });
     if !selection.is_everything() {
         entry["match"] = json!(pruned.matches(&node.location));
     }
@@ -317,14 +338,14 @@ fn ls(repo: &Repo, selection: &Selection, output: Output) -> Result<ExitCode, Er
         .iter()
         .filter(|node| selection.admits(&node.node))
         .collect();
-    if let Some(category) = selection.category {
+    if let Some(category) = selection.ranking_category() {
         // A stable sort: nodes the category fits equally well keep their tree order.
-        listed.sort_by_key(|node| node.node.categories.rank_of(category));
+        listed.sort_by_key(|node| node.node.tags.rank_of(category));
     }
     let value: Vec<Value> = listed
         .iter()
         .map(|node| {
-            json!({ "path": node.location, "mount": node.is_mount, "type": node.node.node_type, "categories": node.node.categories, "charted": node.node.charted, "short": node.node.short, "is": node.node.is })
+            json!({ "path": node.location, "mount": node.is_mount, "type": node.node.node_type, "tags": node.node.tags, "charted": node.node.charted, "short": node.node.short, "is": node.node.is })
         })
         .collect();
     output.emit(&value, &render::ls_text(&listed))
@@ -409,8 +430,8 @@ fn hits_in(node: &LoadedNode, needle: &str) -> Vec<Hit> {
     consider("short".to_owned(), &node.node.short);
     consider("is".to_owned(), &node.node.is);
     consider("type".to_owned(), node.node.node_type.word());
-    for (rank, category) in node.node.categories.ranked().iter().enumerate() {
-        consider(format!("categories[{rank}]"), category.word());
+    for (index, tag) in node.node.tags.authored().iter().enumerate() {
+        consider(format!("tags[{index}]"), tag.as_str());
     }
     for entry in &node.node.fs {
         consider(format!("fs[{}].role", entry.name), &entry.role);
@@ -431,7 +452,7 @@ fn hits_in(node: &LoadedNode, needle: &str) -> Vec<Hit> {
     hits
 }
 
-/// One file `fmt` visited.
+/// One file `fmt` or `migrate` visited.
 #[derive(Debug, Serialize)]
 struct Formatted {
     file: String,
@@ -585,14 +606,7 @@ fn vocabulary(output: Output) -> Result<ExitCode, Error> {
             meaning: node_type.meaning(),
         })
         .collect();
-    let categories: Vec<Term> = Category::ALL
-        .iter()
-        .map(|category| Term {
-            term: category.word(),
-            meaning: category.meaning(),
-        })
-        .collect();
-    let value = json!({ "type": types, "categories": categories });
+    let value = json!({ "type": types });
     output.emit(&value, &render::vocabulary_text())
 }
 
@@ -600,7 +614,7 @@ fn classify(
     repo: &Repo,
     input: &str,
     node_type: NodeType,
-    categories: &[Category],
+    categories: &[Tag],
     output: Output,
 ) -> Result<ExitCode, Error> {
     let file = own_node_file(repo, input)?;
@@ -612,6 +626,30 @@ fn classify(
         })?;
     repo.write(&file, &classified)?;
     output.written(&classified)
+}
+
+/// Walks this tree's own node files through the migration door (see [`Node::parse_migrating`]);
+/// a mounted tree is its own to migrate.
+fn migrate(repo: &Repo, output: Output) -> Result<ExitCode, Error> {
+    let mut visited = Vec::new();
+    for file in &repo.node_files()? {
+        let text = std::fs::read_to_string(file).map_err(|source| Error::io(file, source))?;
+        let migrated = Node::parse_migrating(&text).map_err(|source| Error::Schema {
+            file: file.clone(),
+            source,
+        })?;
+        let changed = repo.write(file, &migrated)?;
+        visited.push(Formatted {
+            file: repo.display(file),
+            changed,
+        });
+    }
+    let text: String = visited
+        .iter()
+        .filter(|entry| entry.changed)
+        .map(|entry| format!("migrate: {}\n", entry.file))
+        .collect();
+    output.emit(&visited, &text)
 }
 
 fn touch(

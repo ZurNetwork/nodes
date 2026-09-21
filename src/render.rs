@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 
 use crate::repo::LoadedNode;
-use crate::schema::{Category, Field, FsEntry, Node, NodeType, Ref};
+use crate::schema::{Field, FsEntry, Node, NodeType, Ref};
 use crate::tree::{NodeTree, Pruned};
 
 /// The whole node, every field labelled.
@@ -12,8 +12,8 @@ pub fn node_text(node: &Node) -> String {
     let _ = writeln!(text, "short: {}", node.short);
     let _ = writeln!(text, "is: {}", node.is);
     let _ = writeln!(text, "type: {}", node.node_type);
-    let ranked_categories = category_words(node).join(", ");
-    let _ = writeln!(text, "categories: {ranked_categories}");
+    let authored_tags = tag_words(node).join(", ");
+    let _ = writeln!(text, "tags: {authored_tags}");
     push_list(&mut text, "conventions", node.conventions.iter().cloned());
     push_list(&mut text, "entry_points", node.entry_points.iter().cloned());
     push_list(&mut text, "fs", node.fs.iter().map(fs_line));
@@ -30,7 +30,7 @@ pub fn field_text(node: &Node, field: Field) -> String {
         Field::Short => vec![node.short.clone()],
         Field::Is => vec![node.is.clone()],
         Field::Type => vec![node.node_type.to_string()],
-        Field::Categories => category_words(node),
+        Field::Tags => tag_words(node),
         Field::Conventions => node.conventions.clone(),
         Field::EntryPoints => node.entry_points.clone(),
         Field::Fs => node.fs.iter().map(fs_line).collect(),
@@ -44,7 +44,7 @@ pub fn field_text(node: &Node, field: Field) -> String {
     text
 }
 
-/// Both closed vocabularies: a heading each, then `word  meaning`, one line per term.
+/// The closed vocabulary: a heading, then `word  meaning`, one line per term.
 pub fn vocabulary_text() -> String {
     let mut text = String::new();
     let _ = writeln!(
@@ -53,13 +53,6 @@ pub fn vocabulary_text() -> String {
     );
     for node_type in NodeType::ALL {
         let _ = writeln!(text, "  {node_type}  {}", node_type.meaning());
-    }
-    let _ = writeln!(
-        text,
-        "\ncategories — what a directory specifically holds, ranked from most to least fitting"
-    );
-    for category in Category::ALL {
-        let _ = writeln!(text, "  {category}  {}", category.meaning());
     }
     text
 }
@@ -144,10 +137,10 @@ fn push_list(text: &mut String, label: &str, items: impl Iterator<Item = String>
     }
 }
 
-/// The node's categories as words, best fit first.
-fn category_words(node: &Node) -> Vec<String> {
-    node.categories
-        .ranked()
+/// The node's tags as words, in the author's order.
+fn tag_words(node: &Node) -> Vec<String> {
+    node.tags
+        .authored()
         .iter()
         .map(ToString::to_string)
         .collect()

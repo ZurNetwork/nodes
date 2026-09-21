@@ -14,5 +14,6 @@ pub mod refindex;
 pub mod render;
 pub mod repo;
 pub mod schema;
+pub mod tag;
 pub mod tree;
 pub mod vocabulary;
