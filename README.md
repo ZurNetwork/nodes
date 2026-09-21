@@ -26,7 +26,9 @@ Every `NODE.json` has exactly these fields, in this order; unknown keys are refu
 
 ## Type and categories
 
-Both vocabularies are closed: a word outside them is a schema error, and a new term is a new release. They live in one table each, in `src/vocabulary.rs`.
+Both vocabularies are closed: a word outside them is a schema error, and a new term is a new release. They live in one table each, in `src/vocabulary.rs`; `nodes vocabulary` prints them with their meanings (`--json` for machines), so a charting tool reads them from the binary it runs rather than from this page.
+
+A tree charted before v0.4.0 is migrated node by node with `nodes classify <path> <type> <category>…` — the one write command that accepts a file missing these two fields (and only these).
 
 - `type` — what the directory broadly holds, the one kind that fits best: `code`, `document`, `art`, `media`, `data`, `software` (installed applications, games, servers — not their source).
 - `categories` — what it specifically holds, ranked from most to least fitting: at least one, none twice, author order (`fmt` never sorts it). Any category may sit under any type.
@@ -71,7 +73,9 @@ Both vocabularies are closed: a word outside them is a schema error, and a new t
 | `nodes check [--ref-index FILE]` | validate; exit 1 on any error |
 | `nodes set <path> <field> <json>` | replace one field, then normalize |
 | `nodes add-ref <path> <page> <title> <governs>` / `nodes rm-ref <path> <page>` | ref edits |
+| `nodes classify <path> <type> <category>…` | set `type` and `categories` together — also on a file written before they existed |
 | `nodes touch <path> [--date YYYY-MM-DD]` | set `charted` to today |
+| `nodes vocabulary` | both closed vocabularies, each term with its meaning (needs no root) |
 
 `--json` on any command emits JSON for machine consumers; a write command prints nothing in text mode and the updated node with `--json`. The repository root is the nearest ancestor of the current directory holding a `NODE.json` whose `path` is `.`; `--root <dir>` overrides.
 

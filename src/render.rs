@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 
 use crate::repo::LoadedNode;
-use crate::schema::{Field, FsEntry, Node, Ref};
+use crate::schema::{Category, Field, FsEntry, Node, NodeType, Ref};
 use crate::tree::NodeTree;
 
 /// The whole node, every field labelled.
@@ -40,6 +40,26 @@ pub fn field_text(node: &Node, field: Field) -> String {
     let mut text = lines.join("\n");
     if !text.is_empty() {
         text.push('\n');
+    }
+    text
+}
+
+/// Both closed vocabularies: a heading each, then `word  meaning`, one line per term.
+pub fn vocabulary_text() -> String {
+    let mut text = String::new();
+    let _ = writeln!(
+        text,
+        "type — what a directory broadly holds: the one kind that fits it best"
+    );
+    for node_type in NodeType::ALL {
+        let _ = writeln!(text, "  {node_type}  {}", node_type.meaning());
+    }
+    let _ = writeln!(
+        text,
+        "\ncategories — what a directory specifically holds, ranked from most to least fitting"
+    );
+    for category in Category::ALL {
+        let _ = writeln!(text, "  {category}  {}", category.meaning());
     }
     text
 }

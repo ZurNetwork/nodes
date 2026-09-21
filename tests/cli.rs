@@ -920,3 +920,94 @@ fn type_and_categories_are_set_from_the_closed_vocabularies() {
     assert!(stdout.contains("error: backend: "), "{stdout}");
     assert!(stdout.contains("missing field `type`"), "{stdout}");
 }
+
+#[test]
+fn vocabulary_prints_both_closed_vocabularies_and_needs_no_root() {
+    let nowhere = TempRepo::new();
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_nodes"))
+            .current_dir(&nowhere.root)
+            .args(args)
+            .output()
+            .expect("runs");
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("utf-8")
+    };
+    let text = run(&["vocabulary"]);
+    let head = "\
+type — what a directory broadly holds: the one kind that fits it best
+  code  program source and what is built from it
+  document  paperwork and written records
+";
+    assert!(text.starts_with(head), "{text}");
+    let categories_head = "\
+categories — what a directory specifically holds, ranked from most to least fitting
+  project  the root of a whole software project
+";
+    assert!(text.contains(categories_head), "{text}");
+    let parsed: Value = serde_json::from_str(&run(&["--json", "vocabulary"])).expect("json");
+    let first_type = json!({"term": "code", "meaning": "program source and what is built from it"});
+    assert_eq!(parsed["type"][0], first_type);
+    assert_eq!(parsed["type"].as_array().expect("types").len(), 6);
+    let categories = parsed["categories"].as_array().expect("categories");
+    assert_eq!(categories.len(), 23);
+    let last_category =
+        json!({"term": "index", "meaning": "catalogs and manifests over other content"});
+    assert_eq!(categories[22], last_category);
+}
+
+#[test]
+fn classify_migrates_a_node_written_before_the_fields_existed() {
+    let repo = TempRepo::charted();
+    let unclassified = repo
+        .read("frontend/NODE.json")
+        .replace("  \"type\": \"code\",\n", "")
+        .replace("  \"categories\": [\n    \"source\"\n  ],\n", "");
+    repo.write("frontend/NODE.json", &unclassified);
+    let (_, stderr) = repo.fails(&["get", "frontend"]);
+    assert!(stderr.contains("missing field `type`"), "{stderr}");
+    let (_, stderr) = repo.fails(&["set", "frontend", "type", "code"]);
+    assert!(
+        stderr.contains("missing field `type`"),
+        "set needs a file that parses: {stderr}"
+    );
+    let silent = repo.ok(&["classify", "frontend", "code", "ui", "source"]);
+    assert_eq!(silent, "", "text mode stays silent");
+    assert_eq!(repo.ok(&["get", "frontend", "type"]), "code\n");
+    assert_eq!(repo.ok(&["get", "frontend", "categories"]), "ui\nsource\n");
+    assert_eq!(repo.ok(&["fmt"]), "", "classify leaves a canonical file");
+    let reclassified = repo.ok(&["--json", "classify", "frontend", "document", "docs"]);
+    let written: Value = serde_json::from_str(&reclassified).expect("json");
+    assert_eq!(written["type"], "document");
+    assert_eq!(written["categories"], json!(["docs"]));
+    let (_, stderr) = repo.fails(&["classify", "frontend", "code", "ui", "ui"]);
+    assert!(stderr.contains("`ui` is ranked more than once"), "{stderr}");
+    let (_, stderr) = repo.fails(&["classify", "frontend", "code"]);
+    assert!(
+        stderr.contains("<CATEGORIES>"),
+        "at least one category: {stderr}"
+    );
+    let (_, stderr) = repo.fails(&["classify", "frontend", "code", "nonsense"]);
+    assert!(stderr.contains("unknown category `nonsense`"), "{stderr}");
+    let (_, stderr) = repo.fails(&["classify", "nowhere", "code", "source"]);
+    assert_eq!(stderr, "nodes: no node charted at `nowhere`\n");
+    let shortless = repo
+        .read("backend/NODE.json")
+        .replace("  \"short\": \"The backend\",\n", "");
+    repo.write("backend/NODE.json", &shortless);
+    let (_, stderr) = repo.fails(&["classify", "backend", "code", "source"]);
+    assert!(
+        stderr.contains("missing field `short`"),
+        "only the classification may be missing: {stderr}"
+    );
+    let mounting = TempRepo::mounting();
+    let (_, stderr) = mounting.fails(&["classify", "life/housing", "document", "housing"]);
+    assert!(
+        stderr.contains("belongs to the tree mounted at `life`"),
+        "{stderr}"
+    );
+}

@@ -9,19 +9,19 @@ use serde::{Deserialize, Serialize};
 /// Declares a closed vocabulary: the enum, its terms in declaration order (`ALL`), and the std
 /// traits that carry a term to and from its word — `Display`, `FromStr`, `TryFrom<String>` and
 /// `From<Self> for String`, which serde rides on. The table below each invocation is the one
-/// place a term is spelled.
+/// place a term is spelled and given its meaning (`Variant => "word", "meaning";`).
 macro_rules! closed_vocabulary {
     (
         $(#[$vocabulary_doc:meta])*
         pub enum $name:ident, a $singular:literal among the $plural:literal {
-            $( $(#[$term_doc:meta])* $variant:ident => $word:literal, )+
+            $( $variant:ident => $word:literal, $meaning:literal; )+
         }
     ) => {
         $(#[$vocabulary_doc])*
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
         #[serde(try_from = "String", into = "String")]
         pub enum $name {
-            $( $(#[$term_doc])* $variant, )+
+            $( #[doc = $meaning] $variant, )+
         }
 
         impl $name {
@@ -32,6 +32,13 @@ macro_rules! closed_vocabulary {
             pub const fn word(self) -> &'static str {
                 match self {
                     $( Self::$variant => $word, )+
+                }
+            }
+
+            /// What the term means, in a few words — what `nodes vocabulary` prints.
+            pub const fn meaning(self) -> &'static str {
+                match self {
+                    $( Self::$variant => $meaning, )+
                 }
             }
         }
@@ -81,18 +88,12 @@ macro_rules! closed_vocabulary {
 closed_vocabulary! {
     /// What a directory broadly holds — the one kind that fits it best.
     pub enum NodeType, a "type" among the "types" {
-        /// Program source and what is built from it.
-        Code => "code",
-        /// Paperwork and written records.
-        Document => "document",
-        /// Artwork.
-        Art => "art",
-        /// Music, pictures, video.
-        Media => "media",
-        /// Datasets, exports, dumps.
-        Data => "data",
-        /// Installed applications, games, servers — not their source.
-        Software => "software",
+        Code => "code", "program source and what is built from it";
+        Document => "document", "paperwork and written records";
+        Art => "art", "artwork";
+        Media => "media", "music, pictures, video";
+        Data => "data", "datasets, exports, dumps";
+        Software => "software", "installed applications, games, servers — not their source";
     }
 }
 
@@ -100,52 +101,29 @@ closed_vocabulary! {
     /// What a directory specifically holds. A node ranks the categories that fit it, best first;
     /// any category may sit under any [`NodeType`].
     pub enum Category, a "category" among the "categories" {
-        /// The root of a whole software project.
-        Project => "project",
-        /// Hand-written program code.
-        Source => "source",
-        /// User-interface code.
-        Ui => "ui",
-        /// Interface definitions: protobuf, lexicons, file formats.
-        Schema => "schema",
-        /// Suites, harnesses, fixtures, fakes.
-        Tests => "tests",
-        /// Machine-written output, never edited by hand.
-        Generated => "generated",
-        /// Scripts, code generators, macros, CI.
-        Tooling => "tooling",
-        /// Services a project runs on: proxies, containers.
-        Infrastructure => "infrastructure",
-        /// Configuration and environment.
-        Config => "config",
-        /// Documentation and pointers.
-        Docs => "docs",
-        /// Decisions and deliberation.
-        Design => "design",
-        /// IDs and civil records.
-        Identity => "identity",
-        /// Diplomas, courses, admissions.
-        Education => "education",
-        /// Invoices, receipts, taxes, banking.
-        Finance => "finance",
-        /// Homes, leases, utilities.
-        Housing => "housing",
-        /// Employers, companies, CVs.
-        Work => "work",
-        /// Medical records.
-        Health => "health",
-        /// Contracts and legal papers.
-        Legal => "legal",
-        /// Artwork.
-        Art => "art",
-        /// Music, pictures, video.
-        Media => "media",
-        /// Unsorted intake.
-        Inbox => "inbox",
-        /// No longer current, kept.
-        Archive => "archive",
-        /// Catalogs and manifests over other content.
-        Index => "index",
+        Project => "project", "the root of a whole software project";
+        Source => "source", "hand-written program code";
+        Ui => "ui", "user-interface code";
+        Schema => "schema", "interface definitions: protobuf, lexicons, file formats";
+        Tests => "tests", "suites, harnesses, fixtures, fakes";
+        Generated => "generated", "machine-written output, never edited by hand";
+        Tooling => "tooling", "scripts, code generators, macros, CI";
+        Infrastructure => "infrastructure", "services a project runs on: proxies, containers";
+        Config => "config", "configuration and environment";
+        Docs => "docs", "documentation and pointers";
+        Design => "design", "decisions and deliberation";
+        Identity => "identity", "IDs and civil records";
+        Education => "education", "diplomas, courses, admissions";
+        Finance => "finance", "invoices, receipts, taxes, banking";
+        Housing => "housing", "homes, leases, utilities";
+        Work => "work", "employers, companies, CVs";
+        Health => "health", "medical records";
+        Legal => "legal", "contracts and legal papers";
+        Art => "art", "artwork";
+        Media => "media", "music, pictures, video";
+        Inbox => "inbox", "unsorted intake";
+        Archive => "archive", "no longer current, kept";
+        Index => "index", "catalogs and manifests over other content";
     }
 }
 
@@ -230,3 +208,32 @@ impl fmt::Display for CategoriesError {
 }
 
 impl std::error::Error for CategoriesError {}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    #[test]
+    fn every_term_is_spelled_once_and_carries_a_meaning() {
+        let type_words: BTreeSet<&str> = NodeType::ALL.iter().map(|term| term.word()).collect();
+        assert_eq!(type_words.len(), NodeType::ALL.len());
+        let category_words: BTreeSet<&str> = Category::ALL.iter().map(|term| term.word()).collect();
+        assert_eq!(category_words.len(), Category::ALL.len());
+        assert!(NodeType::ALL.iter().all(|term| !term.meaning().is_empty()));
+        assert!(Category::ALL.iter().all(|term| !term.meaning().is_empty()));
+    }
+
+    #[test]
+    fn a_term_round_trips_through_its_word() {
+        for category in Category::ALL {
+            assert_eq!(category.word().parse::<Category>(), Ok(*category));
+        }
+        let unknown = "paperwork".parse::<NodeType>().expect_err("closed");
+        assert_eq!(
+            unknown.to_string(),
+            "unknown type `paperwork`; the types are code, document, art, media, data, software"
+        );
+    }
+}

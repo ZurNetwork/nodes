@@ -67,6 +67,24 @@ impl Node {
         serde_json::from_str(text)
     }
 
+    /// Parses a node file whose classification the caller supplies, replacing whatever the file
+    /// says: the one door for a file written before `type` and `categories` existed. Everything
+    /// else must fit the schema as usual.
+    pub fn parse_classified(
+        text: &str,
+        node_type: NodeType,
+        categories: &[Category],
+    ) -> Result<Self, serde_json::Error> {
+        let mut whole: serde_json::Value = serde_json::from_str(text)?;
+        if let Some(fields) = whole.as_object_mut() {
+            let type_key = Field::Type.key().to_owned();
+            let categories_key = Field::Categories.key().to_owned();
+            fields.insert(type_key, serde_json::json!(node_type));
+            fields.insert(categories_key, serde_json::json!(categories));
+        }
+        serde_json::from_value(whole)
+    }
+
     /// The same node in canonical order: `fs` by name, `refs` by page, everything else as authored.
     pub fn canonical(mut self) -> Self {
         self.fs.sort_by(|left, right| left.name.cmp(&right.name));
