@@ -1,9 +1,9 @@
-//! The loaded node tree: lookup by path, ancestor chains, children and citations.
+//! The loaded node tree: lookup by path, ancestor chains and children.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::repo::LoadedNode;
-use crate::schema::{NodePath, PageId, Ref};
+use crate::schema::NodePath;
 
 /// Every loaded node keyed by its location, in tree order (a directory before everything beneath it).
 #[derive(Debug, Default)]
@@ -95,13 +95,6 @@ impl NodeTree {
                 self.nearest_ancestor(&node.location)
                     .is_some_and(|ancestor| ancestor.location == *parent)
             })
-            .collect()
-    }
-
-    /// Every node citing `page`, with the ref that cites it.
-    pub fn citing(&self, page: PageId) -> Vec<(&LoadedNode, &Ref)> {
-        self.iter()
-            .filter_map(|node| node.node.reference(page).map(|reference| (node, reference)))
             .collect()
     }
 }

@@ -1,4 +1,5 @@
-//! The schema IS these structs: a `NODE.inf.json` is exactly one [`Node`], unknown keys refused.
+//! The schema IS these structs. A `NODE.inf.json` is one [`Node`] without its `refs`, which the
+//! tree keeps in its committed `NODE.refs.json` (see [`crate::treerefs`]); unknown keys are refused.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -20,10 +21,16 @@ pub const LEGACY_NODE_FILE: &str = "NODE.json";
 /// The `.gitignore` line that keeps every node file out of version control.
 pub const NODE_FILES_IGNORED: &str = "**/*.inf.json";
 
+/// The file at a tree's root that holds the refs of all its nodes, committed: what `check` reads
+/// when no node tree is present.
+pub const REFS_FILE: &str = "NODE.refs.json";
+
 /// The key a node file ranked its categories under before `tags` existed (up to v0.5).
 const LEGACY_CATEGORIES_KEY: &str = "categories";
 
-/// One directory's chart: what it is, its rules, its named children and the design pages that govern it.
+/// One directory's chart: what it is, its rules, its named children and the design pages that
+/// govern it. Its serde shape is a whole node, `refs` included — what `get` and `chain` print, and
+/// what a node file held up to v0.6; a node file since holds a [`NodeFile`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Node {
@@ -47,10 +54,74 @@ pub struct Node {
     pub entry_points: Vec<String>,
     /// Direct children worth naming; canonical order is by `name`.
     pub fs: Vec<FsEntry>,
-    /// The only place code points at design; canonical order is by `page`.
+    /// The only place code points at design; canonical order is by `page`. Kept in the tree's
+    /// `NODE.refs.json`, not in the node file.
     pub refs: Vec<Ref>,
     /// One note per entry; author order.
     pub notes: Vec<String>,
+}
+
+/// A `NODE.inf.json` as it sits on disk: a [`Node`] without its `refs`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NodeFile {
+    path: NodePath,
+    charted: ChartedDate,
+    short: String,
+    is: String,
+    #[serde(rename = "type")]
+    node_type: NodeType,
+    tags: Tags,
+    conventions: Vec<String>,
+    entry_points: Vec<String>,
+    fs: Vec<FsEntry>,
+    notes: Vec<String>,
+}
+
+/// A node file's node, its refs not yet merged in from the tree's `NODE.refs.json`.
+impl From<NodeFile> for Node {
+    fn from(file: NodeFile) -> Self {
+        Self {
+            path: file.path,
+            charted: file.charted,
+            short: file.short,
+            is: file.is,
+            node_type: file.node_type,
+            tags: file.tags,
+            conventions: file.conventions,
+            entry_points: file.entry_points,
+            fs: file.fs,
+            refs: Vec::new(),
+            notes: file.notes,
+        }
+    }
+}
+
+/// What a node file keeps of a node: everything but its `refs`.
+impl From<Node> for NodeFile {
+    fn from(node: Node) -> Self {
+        Self {
+            path: node.path,
+            charted: node.charted,
+            short: node.short,
+            is: node.is,
+            node_type: node.node_type,
+            tags: node.tags,
+            conventions: node.conventions,
+            entry_points: node.entry_points,
+            fs: node.fs,
+            notes: node.notes,
+        }
+    }
+}
+
+/// A node read through the migration door, and whether its file held its refs itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MigratingNode {
+    pub node: Node,
+    /// `true` for a file from before v0.7, which kept its refs; `false` for one that leaves them to
+    /// `NODE.refs.json`, so `node.refs` is empty.
+    pub carries_refs: bool,
 }
 
 /// A named child of the directory.
@@ -73,16 +144,19 @@ pub struct Ref {
 }
 
 impl Node {
-    /// Parses one `NODE.inf.json`; unknown keys, wrong types, bad dates and bad paths are all schema errors.
+    /// Parses one `NODE.inf.json`; unknown keys (`refs` among them), wrong types, bad dates and bad
+    /// paths are all schema errors. The node's refs are the reader's to merge in.
     pub fn parse(text: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(text)
+        let file: NodeFile = serde_json::from_str(text)?;
+        Ok(Self::from(file))
     }
 
-    /// Parses a node file written before `tags` existed: its ranked `categories` become
-    /// `category:` tags, in the same order. The one door for such a file — `nodes migrate` walks a
-    /// tree through it; a file that already carries `tags` parses as usual, so `categories` left
-    /// beside them are refused rather than silently dropped.
-    pub fn parse_migrating(text: &str) -> Result<Self, serde_json::Error> {
+    /// Parses a node file of any release: a `NODE.json` from before v0.7, which keeps its `refs`
+    /// (and, before v0.6, ranked `categories`, which become `category:` tags in the same order), or
+    /// a `NODE.inf.json`, which keeps neither. The door `nodes migrate` walks a tree through, and
+    /// the one reads take into a tree from before v0.7. `categories` beside `tags` are refused
+    /// rather than silently dropped.
+    pub fn parse_migrating(text: &str) -> Result<MigratingNode, serde_json::Error> {
         let mut whole: serde_json::Value = serde_json::from_str(text)?;
         if let Some(fields) = whole.as_object_mut() {
             let tags_key = Field::Tags.key();
@@ -94,18 +168,35 @@ impl Node {
                 fields.insert(tags_key.to_owned(), category_tags(categories));
             }
         }
-        serde_json::from_value(whole)
+        Self::node_of(whole)
+    }
+
+    /// A node file's fields as the node they hold: with `refs`, a whole node as files up to v0.6
+    /// kept it; without, a `NODE.inf.json`'s node, its refs left to `NODE.refs.json`.
+    fn node_of(whole: serde_json::Value) -> Result<MigratingNode, serde_json::Error> {
+        let carries_refs = whole
+            .as_object()
+            .is_some_and(|fields| fields.contains_key(Field::Refs.key()));
+        let node = if carries_refs {
+            serde_json::from_value(whole)?
+        } else {
+            let file: NodeFile = serde_json::from_value(whole)?;
+            Self::from(file)
+        };
+        let migrating = MigratingNode { node, carries_refs };
+        Ok(migrating)
     }
 
     /// Parses a node file whose classification the caller supplies, replacing whatever the file
     /// says: its `type`, and its `category:` tags — the given ones lead, the file's other tags
     /// follow. The one door for a file written before `type` existed. Everything else must fit
-    /// the schema as usual.
+    /// the schema of the file's own release: a `NODE.json` keeps its `refs`, a `NODE.inf.json`
+    /// leaves them to `NODE.refs.json`.
     pub fn parse_classified(
         text: &str,
         node_type: NodeType,
         categories: &[Tag],
-    ) -> Result<Self, serde_json::Error> {
+    ) -> Result<MigratingNode, serde_json::Error> {
         let mut whole: serde_json::Value = serde_json::from_str(text)?;
         if let Some(fields) = whole.as_object_mut() {
             fields.remove(LEGACY_CATEGORIES_KEY);
@@ -125,7 +216,7 @@ impl Node {
             fields.insert(type_key, serde_json::json!(node_type));
             fields.insert(tags_key, serde_json::Value::Array(tags));
         }
-        serde_json::from_value(whole)
+        Self::node_of(whole)
     }
 
     /// The same node in canonical order: `fs` by name, `refs` by page, everything else as authored.
@@ -135,8 +226,18 @@ impl Node {
         self
     }
 
-    /// The canonical file text: struct field order, two-space indent, one trailing newline.
+    /// The canonical node file text — the node without its `refs`, which the tree's
+    /// `NODE.refs.json` keeps: struct field order, two-space indent, one trailing newline.
     pub fn canonical_json(&self) -> String {
+        let file = NodeFile::from(self.clone().canonical());
+        let mut text = serde_json::to_string_pretty(&file).expect("a node file always serializes");
+        text.push('\n');
+        text
+    }
+
+    /// The whole node, `refs` included, as a `NODE.json` up to v0.6 kept it: what `classify`
+    /// writes into a tree that has not migrated yet. Canonical order, as [`Node::canonical_json`].
+    pub fn canonical_json_with_refs(&self) -> String {
         let canonical = self.clone().canonical();
         let mut text = serde_json::to_string_pretty(&canonical).expect("a Node always serializes");
         text.push('\n');
@@ -158,11 +259,6 @@ impl Node {
         let mut whole = serde_json::to_value(self)?;
         whole[field.key()] = value;
         serde_json::from_value(whole)
-    }
-
-    /// The ref citing `page`, if any.
-    pub fn reference(&self, page: PageId) -> Option<&Ref> {
-        self.refs.iter().find(|reference| reference.page == page)
     }
 }
 
@@ -556,17 +652,24 @@ mod tests {
     {"name": "domain/", "role": "the core", "node": true},
     {"name": "api/", "role": "the driver", "node": true}
   ],
-  "refs": [
-    {"page": 55836674, "title": "The Application Layer", "governs": "use cases"},
-    {"page": 11763713, "title": "Domains and Applications", "governs": "the dependency rule"}
-  ],
   "notes": []
 }"#
     }
 
+    /// The same node as a file from v0.6 kept it: `refs` inside.
+    fn legacy_sample() -> String {
+        let refs = r#""refs": [
+    {"page": 55836674, "title": "The Application Layer", "governs": "use cases"},
+    {"page": 11763713, "title": "Domains and Applications", "governs": "the dependency rule"}
+  ],
+  "notes": []"#;
+        sample().replacen(r#""notes": []"#, refs, 1)
+    }
+
     #[test]
     fn canonical_form_sorts_fs_and_refs_but_keeps_author_order_elsewhere() {
-        let node = Node::parse(sample()).expect("valid").canonical();
+        let migrating = Node::parse_migrating(&legacy_sample()).expect("valid");
+        let node = migrating.node.canonical();
         let fs_names: Vec<&str> = node.fs.iter().map(|entry| entry.name.as_str()).collect();
         assert_eq!(fs_names, ["api/", "domain/"]);
         let pages: Vec<u64> = node.refs.iter().map(|r| r.page.get()).collect();
@@ -643,7 +746,7 @@ mod tests {
         );
         let refused = Node::parse(&legacy).expect_err("the schema has no `categories`");
         assert!(refused.to_string().contains("unknown field `categories`"));
-        let migrated = Node::parse_migrating(&legacy).expect("migrated");
+        let migrated = Node::parse_migrating(&legacy).expect("migrated").node;
         let authored: Vec<&str> = migrated.tags.authored().iter().map(Tag::as_str).collect();
         assert_eq!(
             authored,
@@ -651,9 +754,13 @@ mod tests {
             "the ranking carries over"
         );
         let current = Node::parse(sample()).expect("valid");
+        let already_migrated = MigratingNode {
+            node: current,
+            carries_refs: false,
+        };
         assert_eq!(
             Node::parse_migrating(sample()).expect("already migrated"),
-            current,
+            already_migrated,
             "a file that carries `tags` is left as it is"
         );
         let both = sample().replacen(r#""notes": []"#, r#""notes": [], "categories": ["ui"]"#, 1);
@@ -667,10 +774,25 @@ mod tests {
     }
 
     #[test]
+    fn a_node_file_keeps_no_refs_and_one_from_v0_6_hands_its_refs_over() {
+        let legacy = legacy_sample();
+        let refused = Node::parse(&legacy).expect_err("refs live in NODE.refs.json");
+        assert!(refused.to_string().contains("unknown field `refs`"));
+        let migrating = Node::parse_migrating(&legacy).expect("the door takes v0.6");
+        assert!(migrating.carries_refs);
+        let pages: Vec<u64> = migrating.node.refs.iter().map(|r| r.page.get()).collect();
+        assert_eq!(pages, [55_836_674, 11_763_713], "as the file had them");
+        let written = migrating.node.canonical_json();
+        assert!(!written.contains("\"refs\""), "{written}");
+        assert_eq!(Node::parse(&written).expect("a v0.7 file").refs, []);
+    }
+
+    #[test]
     fn classifying_replaces_the_categories_and_keeps_the_other_tags() {
         let ui = Tag::category("ui").expect("well-formed");
-        let classified =
-            Node::parse_classified(sample(), NodeType::Document, &[ui]).expect("classified");
+        let classified = Node::parse_classified(sample(), NodeType::Document, &[ui])
+            .expect("classified")
+            .node;
         let authored: Vec<&str> = classified.tags.authored().iter().map(Tag::as_str).collect();
         assert_eq!(authored, ["category:ui", "wip"]);
         assert_eq!(classified.node_type, NodeType::Document);

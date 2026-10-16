@@ -1,10 +1,12 @@
 //! `nodes` — the NODE.inf.json normalizer and lookup CLI.
 //!
 //! A repository is charted as a tree of `NODE.inf.json` files, one per directory
-//! that carries information beyond its parent. This crate holds the schema
-//! (the serde structs in [`schema`]), the canonical form (`nodes fmt`), the
-//! validation rules (`nodes check`), the read/write commands over the tree, and
-//! the lookups into the files it charts (`nodes grep`, `recent`, `resolve`).
+//! that carries information beyond its parent, kept out of version control; the
+//! design pages each node cites live in one committed `NODE.refs.json` per tree
+//! ([`treerefs`]). This crate holds the schema (the serde structs in
+//! [`schema`]), the canonical form (`nodes fmt`), the validation rules
+//! (`nodes check`), the read/write commands over the tree, and the lookups into
+//! the files it charts (`nodes grep`, `recent`, `resolve`).
 
 pub mod check;
 pub mod cli;
@@ -19,4 +21,5 @@ pub mod repo;
 pub mod schema;
 pub mod tag;
 pub mod tree;
+pub mod treerefs;
 pub mod vocabulary;
