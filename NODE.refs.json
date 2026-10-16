@@ -1,0 +1,9 @@
+{
+  ".": [
+    {
+      "page": 37519361,
+      "title": "Code Style — Semantic Rulings (Rust)",
+      "governs": "the shape of every Rust item in this crate"
+    }
+  ]
+}
