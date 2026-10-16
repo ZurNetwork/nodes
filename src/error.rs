@@ -23,7 +23,8 @@ pub enum Error {
     TwoNodeFiles { dir: PathBuf },
     /// `migrate` or `init` was pointed at a directory that holds no tree to migrate.
     NoTree { root: PathBuf },
-    /// The tree's refs are here but its nodes are not: a fresh clone, a worktree, CI.
+    /// The tree's refs are here but its nodes are not: a local-only tree's fresh clone, a
+    /// worktree, CI.
     NoNodeTree { root: PathBuf },
     /// A write would follow a symbolic link to wherever it points.
     Symlink { path: PathBuf },
@@ -89,7 +90,7 @@ impl fmt::Display for Error {
         match self {
             Self::NoRoot { start } => write!(
                 f,
-                "no tree in {} or any parent (no root NODE.inf.json, no NODE.refs.json); a tree lives in the checkout where it was charted: pass --root <that checkout>, or start one with `nodes init`",
+                "no tree in {} or any parent (no root NODE.inf.json, no NODE.refs.json); a local-only tree lives in the checkout where it was charted: pass --root <that checkout>, or start one with `nodes init`",
                 start.display()
             ),
             Self::Unmigrated { root, found_above } => {
@@ -117,7 +118,7 @@ impl fmt::Display for Error {
             }
             Self::NoNodeTree { root } => write!(
                 f,
-                "{} holds the tree's NODE.refs.json but no nodes: node files are never committed, so a fresh clone, a worktree or CI has none; chart it here, or pass --root <the checkout that holds the tree>",
+                "{} holds the tree's NODE.refs.json but no nodes: a local-only tree's node files are not committed, so a fresh clone, a worktree or CI has none; chart it here, or pass --root <the checkout that holds the tree>",
                 root.display()
             ),
             Self::NotARoot { dir, path } => write!(

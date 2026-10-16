@@ -18,7 +18,8 @@ pub const NODE_FILE: &str = "NODE.inf.json";
 /// The file name a node lived in up to v0.6; `nodes migrate` is the one command that reads one.
 pub const LEGACY_NODE_FILE: &str = "NODE.json";
 
-/// The `.gitignore` line that keeps every node file out of version control.
+/// The `.gitignore` line `--gitignore` adds, keeping every node file out of version control: a
+/// local-only tree.
 pub const NODE_FILES_IGNORED: &str = "**/*.inf.json";
 
 /// The file at a tree's root that holds the refs of all its nodes, committed: what `check` reads

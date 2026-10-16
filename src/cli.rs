@@ -48,9 +48,9 @@ pub struct Cli {
 pub enum Command {
     #[command(flatten)]
     InTree(TreeCommand),
-    /// Make this directory (or --root) a tree's root: add `**/*.inf.json` to its `.gitignore`
-    /// and, given a type and categories, seed its root NODE.inf.json. Safe to run again: an
-    /// existing node is left as it is.
+    /// Make this directory (or --root) a tree's root: given a type and categories, seed its root
+    /// NODE.inf.json; with --gitignore, first add `**/*.inf.json` to its `.gitignore`. Safe to run
+    /// again: an existing node is left as it is.
     Init(InitArgs),
     /// The closed vocabulary of `type`, each term with its meaning.
     Vocabulary,
@@ -110,8 +110,8 @@ pub enum TreeCommand {
         /// NODE.inf.json files or their directories, repo-relative or absolute.
         files: Vec<PathBuf>,
     },
-    /// Validate every node; exit 1 on any error. With no node tree here (a fresh clone, CI), the
-    /// tree's NODE.refs.json is checked alone.
+    /// Validate every node; exit 1 on any error. With no node tree here (a local-only tree's
+    /// fresh clone, CI), the tree's NODE.refs.json is checked alone.
     Check(CheckArgs),
     /// Replace one field with a JSON value (a value that is not JSON is taken as a string), then normalize.
     Set {
@@ -141,13 +141,12 @@ pub enum TreeCommand {
     },
     /// Bring a tree from an older release up to date: every `NODE.json` (up to v0.6) becomes a
     /// `NODE.inf.json`, every node's refs move into NODE.refs.json, ranked `categories` (up to
-    /// v0.5) become `category:` tags, and the root's `.gitignore` gains `**/*.inf.json`. Also
-    /// normalizes, like `fmt`; a second run changes nothing, and completes an interrupted one.
+    /// v0.5) become `category:` tags, and, with --gitignore, the root's `.gitignore` gains
+    /// `**/*.inf.json`. Also normalizes, like `fmt`; a second run changes nothing, and completes
+    /// an interrupted one.
     Migrate {
-        /// Leave `.gitignore` alone: for a repository that is not yours (keep node files out
-        /// through its exclude file instead), or a tree outside any repository.
-        #[arg(long)]
-        no_gitignore: bool,
+        #[command(flatten)]
+        gitignore: GitignoreArgs,
     },
     /// Set `charted` to today (UTC), or to --date.
     Touch {
@@ -172,19 +171,40 @@ impl TreeCommand {
     }
 }
 
-/// What `init` is told: whether to leave `.gitignore` alone, and the root node to seed, if any.
+/// What `init` is told: whether to keep the node files out of git, and the root node to seed,
+/// if any.
 #[derive(Debug, Args)]
 pub struct InitArgs {
-    /// Leave `.gitignore` alone: for a repository that is not yours (keep node files out through
-    /// its exclude file instead), or a tree outside any repository.
-    #[arg(long)]
-    pub no_gitignore: bool,
+    #[command(flatten)]
+    pub gitignore: GitignoreArgs,
     /// The root node's type (see `nodes vocabulary`); without it, no node is seeded.
     #[arg(requires = "categories")]
     pub node_type: Option<NodeType>,
     /// What the root specifically holds, most fitting first: `project` is tagged `category:project`.
     #[arg(value_name = "CATEGORY", value_parser = category_tag)]
     pub categories: Vec<Tag>,
+}
+
+/// What `init` and `migrate` do about the root's `.gitignore`. A tree is committed with the code by
+/// default; `--gitignore` makes it local-only.
+#[derive(Clone, Copy, Debug, Args)]
+pub struct GitignoreArgs {
+    /// Also add `**/*.inf.json` to the root's `.gitignore`, keeping the node files out of git: a
+    /// local-only tree. Without it the node files are left to be committed with the code.
+    #[arg(long, conflicts_with = "no_gitignore")]
+    pub gitignore: bool,
+    /// Leave `.gitignore` alone: the default since v0.7.1, still accepted so older scripts run
+    /// unchanged.
+    #[arg(long)]
+    pub no_gitignore: bool,
+}
+
+impl GitignoreArgs {
+    /// Whether the run adds `**/*.inf.json` to the root's `.gitignore`: only when asked to, with
+    /// `--gitignore`. `--no-gitignore` asks for the default.
+    pub fn keeps_node_files_out(self) -> bool {
+        self.gitignore
+    }
 }
 
 /// Which nodes a listing keeps: by type, by tags, both, or — with neither — all.
@@ -354,7 +374,7 @@ fn run_in_tree(
             node_type,
             categories,
         } => classify(&repo, &path, node_type, &categories, output),
-        TreeCommand::Migrate { no_gitignore } => migrate(&repo, no_gitignore, output),
+        TreeCommand::Migrate { gitignore } => migrate(&repo, gitignore, output),
         TreeCommand::Tree(selection) => tree(&repo, &selection, output),
         TreeCommand::Ls(selection) => ls(&repo, &selection, output),
         TreeCommand::Chain { path } => chain(&repo, &path, output),
@@ -403,8 +423,8 @@ fn open_repo(root: Option<PathBuf>) -> Result<Repo, Error> {
     Ok(Repo::at(canonical_dir(&root)?))
 }
 
-/// Why a checkout holds no node here: `NoNodeTree` when it holds only the tree's refs (a fresh
-/// clone, a worktree, CI), otherwise `UnknownNode`.
+/// Why a checkout holds no node here: `NoNodeTree` when it holds only the tree's refs (a
+/// local-only tree's fresh clone, a worktree, CI), otherwise `UnknownNode`.
 fn missing_node(repo: &Repo, path: NodePath) -> Error {
     let holds_refs_alone =
         repo.refs_file().is_file() && !repo.node_file(&NodePath::root()).is_file();
@@ -1178,10 +1198,10 @@ enum MigrationStep {
 /// Brings this tree's own node files — `NODE.json` or `NODE.inf.json` — through the migration
 /// door (see [`Node::parse_migrating`]) into `NODE.inf.json` files, their refs into
 /// `NODE.refs.json`. Every file is read before any is written, so a file that does not fit stops
-/// the run with nothing changed. Then `.gitignore` (unless told not to), then the refs — so no
-/// ref lives only in memory — then each node. A run cut short is completed by the next. A mounted
-/// tree is its own to migrate.
-fn migrate(repo: &Repo, no_gitignore: bool, output: Output) -> Result<ExitCode, Error> {
+/// the run with nothing changed. Then — with `--gitignore` only — `.gitignore`, then the refs —
+/// so no ref lives only in memory — then each node. A run cut short is completed by the next. A
+/// mounted tree is its own to migrate.
+fn migrate(repo: &Repo, gitignore: GitignoreArgs, output: Output) -> Result<ExitCode, Error> {
     let found = repo.walk_every_era()?;
     if found.node_files.is_empty() && !repo.refs_file().is_file() {
         let no_tree = Error::NoTree {
@@ -1202,7 +1222,7 @@ fn migrate(repo: &Repo, no_gitignore: bool, output: Output) -> Result<ExitCode, 
     let steps = plan_migration(repo, &found.node_files, &mut refs)?;
     let mut visited: Vec<Migrated> = Vec::new();
     let finish = |visited: &mut Vec<Migrated>| -> Result<(), Error> {
-        if !no_gitignore {
+        if gitignore.keeps_node_files_out() {
             visited.push(Migrated {
                 file: ".gitignore".to_owned(),
                 renamed_from: None,
@@ -1354,8 +1374,9 @@ fn apply_migration_step(repo: &Repo, step: MigrationStep) -> Result<Migrated, Er
     Ok(migrated)
 }
 
-/// Makes `repo`'s directory a tree's root: `.gitignore` first (unless told not to), so no node
-/// file is ever seen untracked, then — given a type — the root node, unless one is already there.
+/// Makes `repo`'s directory a tree's root: given a type, the root node, unless one is already
+/// there. With `--gitignore`, `.gitignore` first, so no node file of a local-only tree is ever
+/// seen untracked. Given neither, it writes nothing and says so.
 fn init(repo: &Repo, args: InitArgs, output: Output) -> Result<ExitCode, Error> {
     if repo.is_unmigrated() {
         let unmigrated = Error::Unmigrated {
@@ -1366,8 +1387,14 @@ fn init(repo: &Repo, args: InitArgs, output: Output) -> Result<ExitCode, Error> 
     }
     // A directory holding a node of a tree above is refused before anything is written.
     let holds_root_node = holds_root_node(repo)?;
+    let keeps_node_files_out = args.gitignore.keeps_node_files_out();
+    if !keeps_node_files_out && args.node_type.is_none() {
+        note(
+            "nothing to do: give a type and categories to seed a root node, or --gitignore to keep the node files out of git",
+        );
+    }
     let mut visited = Vec::new();
-    if !args.no_gitignore {
+    if keeps_node_files_out {
         visited.push(Formatted {
             file: ".gitignore".to_owned(),
             changed: repo.ignore_node_files()?,

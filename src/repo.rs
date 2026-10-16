@@ -452,10 +452,11 @@ impl Repo {
         Ok(())
     }
 
-    /// Keeps every node file out of version control: appends [`NODE_FILES_IGNORED`] to the
-    /// root's `.gitignore` — creating it if need be, in the line endings it already uses — unless
-    /// a line already says it. A `.gitignore` that re-includes node files (`!…`) is left as it is,
-    /// with a note: the appended line would silently override it. `true` when the file changed.
+    /// Makes the tree local-only, as `--gitignore` asks: keeps every node file out of version
+    /// control by appending [`NODE_FILES_IGNORED`] to the root's `.gitignore` — creating it if need
+    /// be, in the line endings it already uses — unless a line already says it. A `.gitignore` that
+    /// re-includes node files (`!…`) is left as it is, with a note: the appended line would silently
+    /// override it. `true` when the file changed.
     pub fn ignore_node_files(&self) -> Result<bool, Error> {
         let file = self.root.join(".gitignore");
         let current = read_if_present(&file)?.unwrap_or_default();
