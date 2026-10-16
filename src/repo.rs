@@ -198,9 +198,10 @@ impl Repo {
         Self::is_unmigrated_dir(&self.root)
     }
 
-    /// Whether `dir` holds a `NODE.json` and no `NODE.inf.json`.
+    /// Whether `dir` holds a `NODE.json` — beside a `NODE.inf.json` or not: until `migrate` has
+    /// run, which of the two is current is not the tool's to guess.
     pub fn is_unmigrated_dir(dir: &Path) -> bool {
-        dir.join(LEGACY_NODE_FILE).is_file() && !dir.join(NODE_FILE).is_file()
+        dir.join(LEGACY_NODE_FILE).is_file()
     }
 
     pub fn root(&self) -> &Path {

@@ -1251,6 +1251,14 @@ fn migrate_refuses_a_directory_holding_both_files_and_changes_nothing() {
         !repo.root.join(".gitignore").exists(),
         "nothing is written before every file is read"
     );
+    let root = repo.read("NODE.inf.json");
+    repo.write("NODE.json", &root);
+    let (_, stderr) = repo.fails(&["classify", "frontend", "code", "ui"]);
+    assert!(
+        stderr.contains("run `nodes migrate`"),
+        "a root holding both files is still unmigrated: {stderr}"
+    );
+    fs::remove_file(repo.root.join("NODE.json")).expect("removed");
     let unreadable = "{ not json";
     repo.write("frontend/NODE.json", unreadable);
     repo.unmigrate("backend");
