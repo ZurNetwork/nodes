@@ -4,10 +4,10 @@ The `NODE.inf.json` normalizer and lookup CLI. A repository is charted as a tree
 
 A tree keeps two kinds of data, two ways:
 
-- **The nodes** — what each directory is, its rules, its named children — are derived from the code and can be re-charted, so they stay out of version control: `nodes init` and `nodes migrate` add `**/*.inf.json` to the root's `.gitignore`. A tree lives in the checkout where it was charted; a fresh clone, a worktree or CI has none.
-- **The refs** — which design page governs what — are authored, so they are committed: one [`NODE.refs.json`](#the-refs-file) at the tree's root holds every node's. They are versioned, reviewed with the code, and checked in CI, where there is no node tree (`nodes check --ref-index`).
+- **The nodes** — what each directory is, its rules, its named children — are derived from the code and can be re-charted. By default they are committed with the code: versioned, reviewed, present in every clone and worktree, and checked in CI by `nodes check`. Local-only by choice: `--gitignore` on `init` or `migrate` adds `**/*.inf.json` to the root's `.gitignore` (a repository that is not yours keeps them out through its own `.git/info/exclude` instead). Such a tree lives only in the checkout where it was charted; a fresh clone, a worktree or CI has none.
+- **The refs** — which design page governs what — are authored, so they are always committed: one [`NODE.refs.json`](#the-refs-file) at the tree's root holds every node's. Even a local-only tree's refs are versioned, reviewed with the code, and checked in CI, where `check` then checks the refs alone (`nodes check --ref-index`).
 
-Tools that honour `.gitignore` — ripgrep, fd, an editor's search, `eza` — hide the node files by default; `nodes` always finds them.
+A tree is committed by default, local-only by choice. Tools that honour `.gitignore` — ripgrep, fd, an editor's search, `eza` — hide the node files of a local-only tree by default; `nodes` always finds them.
 
 ## The schema
 
@@ -56,21 +56,22 @@ A tree charted before v0.6.0 ranked its categories in a closed `categories` list
 
 ## Starting a tree
 
-`nodes init` makes the current directory (or `--root`) a tree's root. It first adds `**/*.inf.json` to that directory's `.gitignore`, so no node file is ever seen untracked; then, given a type and categories, it seeds the root node — `short` is the directory's name, `is` starts empty, for `nodes set` to fill:
+`nodes init` makes the current directory (or `--root`) a tree's root. Given a type and categories, it seeds the root node — `short` is the directory's name, `is` starts empty, for `nodes set` to fill. With `--gitignore` it first adds `**/*.inf.json` to that directory's `.gitignore`, so no node file of a local-only tree is ever seen untracked:
 
 ```
 $ nodes init code project tooling
-init: .gitignore
 init: NODE.inf.json
 ```
 
-It never walks up to an ancestor's tree, and it is safe to run again: an existing root node is left as it is (a note on stderr says so), and with no type it only sees to the `.gitignore` line. A directory that holds a node of a tree above is no root, and is refused; seeding a root beneath another tree makes a mount of it, and a note says to list it there.
+Up to v0.7.0, `init` and `migrate` added the line by default; since v0.7.1 they leave `.gitignore` alone unless given `--gitignore`.
 
-The `.gitignore` line:
+It never walks up to an ancestor's tree, and it is safe to run again: an existing root node is left as it is (a note on stderr says so), and with no type it only sees to the `.gitignore` line (given `--gitignore`) or, without that, has nothing to do — a note says so. A directory that holds a node of a tree above is no root, and is refused; seeding a root beneath another tree makes a mount of it, and a note says to list it there.
 
-- `--no-gitignore` (on `init` and `migrate`) leaves `.gitignore` alone: for a repository that is not yours, which keeps the node files out through its own exclude file (`.git/info/exclude`), or a tree outside any repository;
+With `--gitignore` (on `init` and `migrate`), the line:
+
 - it is not added twice, nor beside a line that already says it (`*.inf.json`), nor after a `!` line that re-includes node files — that `.gitignore` is left as it is, with a note;
-- a `.gitignore` with CRLF line endings gets CRLF; a missing one is created.
+- a `.gitignore` with CRLF line endings gets CRLF; a missing one is created;
+- `--no-gitignore` is accepted and does nothing — it is the default since v0.7.1, kept so scripts written for v0.7.0 run unchanged; it cannot be combined with `--gitignore`.
 
 No file is written through a symbolic link, and each is written beside itself first, then renamed into place, so a concurrent reader sees the old file or the new one.
 
@@ -78,7 +79,7 @@ No file is written through a symbolic link, and each is written beside itself fi
 
 Up to v0.6 a node lived in a `NODE.json` that held its own refs. `nodes migrate`, run from a tree's root, brings the whole tree up to date in one go:
 
-- the root's `.gitignore` gains `**/*.inf.json` (unless `--no-gitignore`);
+- with `--gitignore`, the root's `.gitignore` gains `**/*.inf.json`;
 - every node's refs move into the tree's `NODE.refs.json`;
 - every `NODE.json` becomes a `NODE.inf.json` beside it;
 - a file from before v0.6.0 has its ranked `categories` rewritten into tags — `"categories": ["ui", "source"]` becomes `"tags": ["category:ui", "category:source"]`;
@@ -86,7 +87,6 @@ Up to v0.6 a node lived in a `NODE.json` that held its own refs. `nodes migrate`
 
 ```
 $ nodes migrate
-migrate: .gitignore
 migrate: NODE.refs.json
 migrate: NODE.json → NODE.inf.json
 migrate: backend/NODE.json → backend/NODE.inf.json
@@ -94,14 +94,14 @@ migrate: backend/NODE.json → backend/NODE.inf.json
 
 - **Nothing half-done.** Every file is read before any is written, so one that does not fit stops the run with nothing changed. The refs file is written before any node, and each node is renamed — atomically — before it is rewritten, so a run cut short (a crash, a full disk, a file another program holds) loses nothing: it says how far it got, and the next run finishes it. A run on a migrated tree changes nothing.
 - **Both files in one directory** — what checking out an older commit brings back: when the `NODE.json` says what the `NODE.inf.json` says, it goes; when they differ, the run is refused.
-- **Mounts.** A mounted tree — whichever file holds its root — is migrated from its own root; `migrate` names each one it leaves alone. A directory holding no tree is refused, not given a `.gitignore`.
+- **Mounts.** A mounted tree — whichever file holds its root — is migrated from its own root; `migrate` names each one it leaves alone. A directory holding no tree is refused, and nothing is written.
 - `--json` lists every file visited as `{file, changed}`, plus `renamed_from` for a moved node.
 
 **Until then, the tree is read as it is.** Every read — `tree`, `ls`, `chain`, `get`, `refs`, `find`, `grep`, `recent`, `resolve`, `check` — works on a tree whose root holds a `NODE.json`, with a note on stderr. The writes — `set`, `touch`, `add-ref`, `rm-ref`, `fmt`, `init` — wait for `nodes migrate`. So installing the binary and migrating each tree are separate steps. The one write an old tree takes is `classify`, which readies a file from before v0.4.0 (no `type`) for `migrate`, in place: `nodes classify <path> <type> <category>…`.
 
-**Committing it.** In git, the old `NODE.json` files leave the index as deletions, and `NODE.refs.json` and the `.gitignore` line arrive: `git add -u && git add NODE.refs.json`, then commit (`git add -A` would stage unrelated work too).
+**Committing it.** In git, the old `NODE.json` files leave the index as deletions, and the `NODE.inf.json` files and `NODE.refs.json` arrive. For a committed tree (the default), from the top level: `git add -u && git add NODE.refs.json '*.inf.json'`, then commit (git's pathspec `*` crosses directories, so it catches every nested node file; `git add -A` would stage unrelated work too). For a local-only tree (`--gitignore`): `git add -u && git add NODE.refs.json .gitignore`.
 
-**Other checkouts of the repository** lose their tree when they pull that commit: its deleted `NODE.json` files were their nodes. To keep it, migrate there first and hand the two committed files back to git before pulling — `nodes migrate`, `git restore .gitignore`, `rm NODE.refs.json`, `git pull` — or pull, and re-chart.
+**Other checkouts of the repository.** A committed tree: pulling the migration commit brings the new tree — just pull, don't migrate there first (its untracked `NODE.inf.json` files would block the pull). A local-only tree: the pull deletes their `NODE.json` files, which were their nodes. To keep it, migrate there first and hand the committed refs file back to git before pulling — `nodes migrate`, `rm NODE.refs.json`, `git pull` (the pull brings the `.gitignore` line) — or pull, and re-chart.
 
 ## Commands
 
@@ -121,12 +121,12 @@ migrate: backend/NODE.json → backend/NODE.inf.json
 | `nodes set <path> <field> <json>` | replace one field, then normalize |
 | `nodes add-ref <path> <page> <title> <governs>` / `nodes rm-ref <path> <page>` | ref edits, into `NODE.refs.json` — with no node tree here, for any directory |
 | `nodes classify <path> <type> <category>…` | set `type` and the `category:` tags together (the other tags are kept) — also on a file written before they existed, and on a tree that has not migrated yet |
-| `nodes init [--no-gitignore] [<type> <category>…]` | make this directory a tree's root: `**/*.inf.json` into `.gitignore`, then — given a type — a root node |
-| `nodes migrate [--no-gitignore]` | bring an older tree up to date: `NODE.json` → `NODE.inf.json`, refs → `NODE.refs.json`, `categories` → `category:` tags, `**/*.inf.json` into `.gitignore` |
+| `nodes init [--gitignore] [<type> <category>…]` | make this directory a tree's root: given a type, a root node; with `--gitignore`, `**/*.inf.json` into `.gitignore` first |
+| `nodes migrate [--gitignore]` | bring an older tree up to date: `NODE.json` → `NODE.inf.json`, refs → `NODE.refs.json`, `categories` → `category:` tags; with `--gitignore`, `**/*.inf.json` into `.gitignore` |
 | `nodes touch <path> [--date YYYY-MM-DD]` | set `charted` to today |
 | `nodes vocabulary` | the closed `type` vocabulary, each term with its meaning (needs no root) |
 
-`--json` on any command emits JSON for machine consumers; a write command prints nothing in text mode and the updated node with `--json`. The repository root is the nearest ancestor of the current directory that roots a tree: its node file (a `NODE.inf.json`, or a `NODE.json` from before v0.7) declares `path` `.`, or it holds a `NODE.refs.json` — all a checkout with no node tree has. `init` starts in the current directory instead; `--root <dir>` overrides. A tree lives in the checkout where it was charted: from another worktree or clone, read it with `--root <that checkout>`.
+`--json` on any command emits JSON for machine consumers; a write command prints nothing in text mode and the updated node with `--json`. The repository root is the nearest ancestor of the current directory that roots a tree: its node file (a `NODE.inf.json`, or a `NODE.json` from before v0.7) declares `path` `.`, or it holds a `NODE.refs.json` — all a checkout with no node tree has. `init` starts in the current directory instead; `--root <dir>` overrides. A local-only tree lives in the checkout where it was charted: from another worktree or clone, read it with `--root <that checkout>`.
 
 ```
 $ nodes tree
@@ -199,7 +199,7 @@ Every walk stays out of:
 - hidden directories (`.name/`), unless a `!.name/` line re-includes them;
 - `.git`, `.jj`, `node_modules` and `target`, always.
 
-The walk that finds `NODE.inf.json` files judges directories only, so a `*.json` line — or the `**/*.inf.json` that keeps the nodes out of git — never hides a node. The walks over content (`grep`, `recent`, `resolve`) also judge each file: a pattern such as `*.log` passes it by, and so does a hidden name (`.env`) unless a `!.name` line re-includes it. A line git would not understand is passed over.
+The walk that finds `NODE.inf.json` files judges directories only, so a `*.json` line — or the `**/*.inf.json` that keeps a local-only tree's nodes out of git — never hides a node. The walks over content (`grep`, `recent`, `resolve`) also judge each file: a pattern such as `*.log` passes it by, and so does a hidden name (`.env`) unless a `!.name` line re-includes it. A line git would not understand is passed over.
 
 ## Canonical form
 
@@ -216,7 +216,7 @@ The walk that finds `NODE.inf.json` files judges directories only, so a `*.json`
 - `NODE.refs.json` lists each path once, and cites pages only for directories that exist (an error otherwise) and that carry a node (a warning otherwise: chart the directory, or move the refs to the node that should carry them);
 - with `--ref-index <file>`: every cited page appears in that file (a line's first run of digits is its page id), and a page whose line carries the superseded marker (`SUPERSEDED` by default, `--superseded-marker` to change) warns.
 
-**With no node tree here** — only the committed `NODE.refs.json`, as in CI or a fresh clone — `check` checks the refs alone: every path a directory, no page twice per path, and the `--ref-index` rules. Its summary says so: `refs only (no node tree here): 12 refs, 0 errors, 0 warnings`. `--json` reports carry `refs` (how many were checked) and `tree` (whether a node tree was there).
+**With no node tree here** — only the committed `NODE.refs.json`, as in CI or a fresh clone of a local-only tree — `check` checks the refs alone: every path a directory, no page twice per path, and the `--ref-index` rules. Its summary says so: `refs only (no node tree here): 12 refs, 0 errors, 0 warnings`. `--json` reports carry `refs` (how many were checked) and `tree` (whether a node tree was there).
 
 ## Install
 
