@@ -19,18 +19,22 @@ use crate::grep::{self, Needle, Searched};
 use crate::refindex::DEFAULT_SUPERSEDED_MARKER;
 use crate::render;
 use crate::repo::{Content, LoadedNode, Repo};
-use crate::schema::{ChartedDate, Field, NODE_FILE, Node, NodePath, NodeType, PageId, Ref, Tag};
+use crate::schema::{
+    ChartedDate, Field, LEGACY_NODE_FILE, NODE_FILE, Node, NodePath, NodeType, PageId, Ref, Tag,
+    Tags,
+};
 use crate::tag::MalformedTag;
 use crate::tree::{NodeTree, Pruned};
 
-/// NODE.json normalizer and lookup.
+/// NODE.inf.json normalizer and lookup.
 #[derive(Debug, Parser)]
 #[command(name = "nodes", version, about)]
 pub struct Cli {
     /// Emit JSON instead of text.
     #[arg(long, global = true)]
     pub json: bool,
-    /// Repository root (default: the nearest ancestor of the current directory holding a root NODE.json).
+    /// Repository root (default: the nearest ancestor of the current directory holding a root NODE.inf.json;
+    /// for `init`, the current directory).
     #[arg(long, global = true, value_name = "DIR")]
     pub root: Option<PathBuf>,
     #[command(subcommand)]
@@ -62,7 +66,7 @@ pub enum Command {
     Find { term: String },
     /// Case-insensitive full-text search over what the tree holds — `find` searches the chart,
     /// `grep` the text files it charts: path (the owning node), file, line and the line's text.
-    /// Ignored, hidden and binary files are passed by; `NODE.json` files are `find`'s.
+    /// Ignored, hidden and binary files are passed by; `NODE.inf.json` files are `find`'s.
     Grep {
         term: Needle,
         /// Stop after this many hits (default: every hit).
@@ -84,9 +88,9 @@ pub enum Command {
         #[arg(long, value_name = "N", default_value = "10")]
         limit: Limit,
     },
-    /// Normalize NODE.json files in place (default: every one in the repository).
+    /// Normalize NODE.inf.json files in place (default: every one in the repository).
     Fmt {
-        /// NODE.json files or their directories, repo-relative or absolute.
+        /// NODE.inf.json files or their directories, repo-relative or absolute.
         files: Vec<PathBuf>,
     },
     /// Validate every node; exit 1 on any error.
@@ -116,9 +120,21 @@ pub enum Command {
         #[arg(required = true, value_name = "CATEGORY", value_parser = category_tag)]
         categories: Vec<Tag>,
     },
-    /// Rewrite every node written before `tags` existed (up to v0.5): its ranked `categories`
-    /// become `category:` tags. Also normalizes, like `fmt`; a second run changes nothing.
+    /// Bring a tree from an older release up to date: every `NODE.json` (up to v0.6) becomes a
+    /// `NODE.inf.json`, ranked `categories` (up to v0.5) become `category:` tags, and the root's
+    /// `.gitignore` gains `**/*.inf.json`. Also normalizes, like `fmt`; a second run changes nothing.
     Migrate,
+    /// Make this directory (or --root) a tree's root: add `**/*.inf.json` to its `.gitignore`
+    /// and, given a type and categories, seed its root NODE.inf.json. Safe to run again: an
+    /// existing node is left as it is.
+    Init {
+        /// The root node's type (see `nodes vocabulary`); without it, no node is seeded.
+        #[arg(requires = "categories")]
+        node_type: Option<NodeType>,
+        /// What the root specifically holds, most fitting first: `project` is tagged `category:project`.
+        #[arg(value_name = "CATEGORY", value_parser = category_tag)]
+        categories: Vec<Tag>,
+    },
     /// The closed vocabulary of `type`, each term with its meaning.
     Vocabulary,
     /// Set `charted` to today (UTC), or to --date.
@@ -275,9 +291,27 @@ pub fn run(cli: Cli) -> Result<ExitCode, Error> {
     if matches!(cli.command, Command::Vocabulary) {
         return vocabulary(output);
     }
+    // `init` makes a root: it starts where it is told, never at an ancestor's tree.
+    if let Command::Init {
+        node_type,
+        categories,
+    } = cli.command
+    {
+        let repo = init_repo(cli.root)?;
+        return init(&repo, node_type, categories, output);
+    }
     let repo = open_repo(cli.root)?;
+    let is_migrate = matches!(cli.command, Command::Migrate);
+    if repo.is_unmigrated() && !is_migrate {
+        let unmigrated = Error::Unmigrated {
+            root: repo.root().to_path_buf(),
+        };
+        return Err(unmigrated);
+    }
     match cli.command {
-        Command::Vocabulary => vocabulary(output),
+        Command::Vocabulary | Command::Init { .. } => {
+            unreachable!("handled before a root is opened")
+        }
         Command::Classify {
             path,
             node_type,
@@ -305,6 +339,18 @@ pub fn run(cli: Cli) -> Result<ExitCode, Error> {
         Command::RmRef { path, page } => rm_ref(&repo, &path, page, output),
         Command::Touch { path, date } => touch(&repo, &path, date, output),
     }
+}
+
+/// The directory `init` makes a root: `--root` when given, otherwise the current directory.
+fn init_repo(root: Option<PathBuf>) -> Result<Repo, Error> {
+    let dir = match root {
+        Some(root) => root,
+        None => std::env::current_dir().map_err(|source| Error::io(".", source))?,
+    };
+    let canonical = dir
+        .canonicalize()
+        .map_err(|source| Error::io(&dir, source))?;
+    Ok(Repo::at(canonical))
 }
 
 fn open_repo(root: Option<PathBuf>) -> Result<Repo, Error> {
@@ -344,7 +390,7 @@ fn read_own_node(repo: &Repo, input: &str) -> Result<LoadedNode, Error> {
     repo.read(&file)
 }
 
-/// The `NODE.json` a write to a typed path lands in: this tree's own, and already there.
+/// The `NODE.inf.json` a write to a typed path lands in: this tree's own, and already there.
 fn own_node_file(repo: &Repo, input: &str) -> Result<PathBuf, Error> {
     let path = repo.node_path(input)?;
     refuse_inside_mount(repo, &path)?;
@@ -771,7 +817,7 @@ fn resolve(repo: &Repo, query: &str, limit: Limit, output: Output) -> Result<Exi
     output.emit(&resolved, &text)
 }
 
-/// One file `fmt` or `migrate` visited.
+/// One file `fmt` or `init` visited.
 #[derive(Debug, Serialize)]
 struct Formatted {
     file: String,
@@ -803,7 +849,7 @@ fn fmt(repo: &Repo, files: &[PathBuf], output: Output) -> Result<ExitCode, Error
     output.emit(&visited, &text)
 }
 
-/// A `fmt` argument as the file to format: absolute as given, otherwise under the root; a directory means its NODE.json.
+/// A `fmt` argument as the file to format: absolute as given, otherwise under the root; a directory means its NODE.inf.json.
 fn fmt_target(repo: &Repo, given: &Path) -> PathBuf {
     let absolute = if given.is_absolute() {
         given.to_path_buf()
@@ -947,28 +993,147 @@ fn classify(
     output.written(&classified)
 }
 
-/// Walks this tree's own node files through the migration door (see [`Node::parse_migrating`]);
-/// a mounted tree is its own to migrate.
+/// One file `migrate` visited.
+#[derive(Debug, Serialize)]
+struct Migrated {
+    file: String,
+    /// The `NODE.json` the node was moved out of, when it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    renamed_from: Option<String>,
+    changed: bool,
+}
+
+/// Walks this tree's own node files — `NODE.json` or `NODE.inf.json` — through the migration door
+/// (see [`Node::parse_migrating`]) into `NODE.inf.json` files, after `.gitignore` learns to keep
+/// them out. Every file is read before any is written, so a file that does not fit stops the run
+/// with nothing changed. A mounted tree is its own to migrate.
 fn migrate(repo: &Repo, output: Output) -> Result<ExitCode, Error> {
-    let mut visited = Vec::new();
-    for file in &repo.node_files()? {
+    let files = repo.node_files_with_legacy()?;
+    let mut migrated: Vec<(&PathBuf, Node)> = Vec::new();
+    for file in &files {
+        let is_legacy = file
+            .file_name()
+            .is_some_and(|name| name == LEGACY_NODE_FILE);
+        let dir = file.parent().unwrap_or(repo.root());
+        if is_legacy && dir.join(NODE_FILE).is_file() {
+            let two_node_files = Error::TwoNodeFiles {
+                dir: dir.to_path_buf(),
+            };
+            return Err(two_node_files);
+        }
         let text = std::fs::read_to_string(file).map_err(|source| Error::io(file, source))?;
-        let migrated = Node::parse_migrating(&text).map_err(|source| Error::Schema {
+        let node = Node::parse_migrating(&text).map_err(|source| Error::Schema {
             file: file.clone(),
             source,
         })?;
-        let changed = repo.write(file, &migrated)?;
-        visited.push(Formatted {
-            file: repo.display(file),
-            changed,
+        migrated.push((file, node));
+    }
+    let gitignore = Migrated {
+        file: ".gitignore".to_owned(),
+        renamed_from: None,
+        changed: repo.ignore_node_files()?,
+    };
+    let mut visited = vec![gitignore];
+    for (file, node) in migrated {
+        let target = file.with_file_name(NODE_FILE);
+        let rewritten = repo.write(&target, &node)?;
+        let renamed = target != *file;
+        if renamed {
+            std::fs::remove_file(file).map_err(|source| Error::io(file, source))?;
+        }
+        visited.push(Migrated {
+            file: repo.display(&target),
+            renamed_from: renamed.then(|| repo.display(file)),
+            changed: rewritten || renamed,
         });
     }
     let text: String = visited
         .iter()
         .filter(|entry| entry.changed)
-        .map(|entry| format!("migrate: {}\n", entry.file))
+        .map(|entry| match &entry.renamed_from {
+            Some(legacy) => format!("migrate: {legacy} → {}\n", entry.file),
+            None => format!("migrate: {}\n", entry.file),
+        })
         .collect();
     output.emit(&visited, &text)
+}
+
+/// Makes `repo`'s directory a tree's root: `.gitignore` first, so no node file is ever seen
+/// untracked, then — given a type — the root node, unless one is already there.
+fn init(
+    repo: &Repo,
+    node_type: Option<NodeType>,
+    categories: Vec<Tag>,
+    output: Output,
+) -> Result<ExitCode, Error> {
+    if repo.is_unmigrated() {
+        let unmigrated = Error::Unmigrated {
+            root: repo.root().to_path_buf(),
+        };
+        return Err(unmigrated);
+    }
+    let gitignore = Formatted {
+        file: ".gitignore".to_owned(),
+        changed: repo.ignore_node_files()?,
+    };
+    let mut visited = vec![gitignore];
+    if let Some(node_type) = node_type {
+        let seeded = seed_root(repo, node_type, categories)?;
+        visited.push(seeded);
+    }
+    let text: String = visited
+        .iter()
+        .filter(|entry| entry.changed)
+        .map(|entry| format!("init: {}\n", entry.file))
+        .collect();
+    output.emit(&visited, &text)
+}
+
+/// Writes the root node `init` seeds — `short` is the directory's name, `is` starts empty — unless
+/// a node is already there.
+fn seed_root(repo: &Repo, node_type: NodeType, categories: Vec<Tag>) -> Result<Formatted, Error> {
+    let file = repo.node_file(&NodePath::root());
+    let name = repo.display(&file);
+    if file.is_file() {
+        note(&format!("{name} is already there: left as it is"));
+        let left_alone = Formatted {
+            file: name,
+            changed: false,
+        };
+        return Ok(left_alone);
+    }
+    let words: Vec<&str> = categories.iter().map(Tag::word).collect();
+    let input = words.join(" ");
+    let tags = Tags::try_from(categories).map_err(|reason| Error::InvalidArgument {
+        what: "categories",
+        input,
+        reason: reason.to_string(),
+    })?;
+    let short = repo
+        .root()
+        .file_name()
+        .and_then(|dir_name| dir_name.to_str())
+        .unwrap_or(".")
+        .to_owned();
+    let root_node = Node {
+        path: NodePath::root(),
+        charted: ChartedDate::today_utc(),
+        short,
+        is: String::new(),
+        node_type,
+        tags,
+        conventions: Vec::new(),
+        entry_points: Vec::new(),
+        fs: Vec::new(),
+        refs: Vec::new(),
+        notes: Vec::new(),
+    };
+    let changed = repo.write(&file, &root_node)?;
+    let seeded = Formatted {
+        file: name,
+        changed,
+    };
+    Ok(seeded)
 }
 
 fn touch(

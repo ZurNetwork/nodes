@@ -86,7 +86,7 @@ pub fn check(repo: &Repo, options: &CheckOptions) -> Result<Report, Error> {
         findings.push(Finding {
             severity: Severity::Error,
             path: NodePath::root(),
-            message: "no root node: a NODE.json whose path is \".\" must sit at the root"
+            message: "no root node: a NODE.inf.json whose path is \".\" must sit at the root"
                 .to_owned(),
         });
     }
@@ -130,7 +130,7 @@ fn check_path(node: &LoadedNode, findings: &mut Vec<Finding>) {
     findings.push(error(node, message));
 }
 
-/// Every `fs` entry flagged `node: true` has a `NODE.json` at that path beneath this node — a nested
+/// Every `fs` entry flagged `node: true` has a `NODE.inf.json` at that path beneath this node — a nested
 /// name such as `src/account/` is allowed, so a pass-through directory need not carry a node of its
 /// own — and the walk reaches it: a node that is hidden, ignored or inside a mount is no node of
 /// this tree, whatever `fs` says.
@@ -153,8 +153,13 @@ fn check_fs_children(
             continue;
         }
         let mount_above = repo.mount_holding(&child).filter(|mount| *mount != child);
-        let why_not = if !repo.node_file(&child).is_file() {
-            format!("`{child}` has no NODE.json")
+        let child_dir = child.to_dir(repo.root());
+        let why_not = if Repo::is_unmigrated_dir(&child_dir) {
+            format!(
+                "`{child}` holds a NODE.json from before v0.7 — run `nodes migrate` (in a mounted tree, from its root)"
+            )
+        } else if !repo.node_file(&child).is_file() {
+            format!("`{child}` has no NODE.inf.json")
         } else if let Some(mount) = mount_above {
             format!("`{child}` belongs to the tree mounted at `{mount}`")
         } else {
@@ -205,7 +210,7 @@ fn check_listed_by_ancestor(tree: &NodeTree, location: &NodePath, findings: &mut
     let message = match listing {
         Some(entry) if entry.node => return,
         Some(_) => format!(
-            "listed in `{}`'s fs with node: false, but it has a NODE.json",
+            "listed in `{}`'s fs with node: false, but it has a NODE.inf.json",
             ancestor.location
         ),
         None => format!("not listed in `{}`'s fs", ancestor.location),

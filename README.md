@@ -1,10 +1,12 @@
 # nodes
 
-The `NODE.json` normalizer and lookup CLI. A repository is charted as a tree of `NODE.json` files, one per directory that carries information beyond its parent; `nodes` formats them into one canonical shape, validates the tree, and answers lookups so a reader (human or model) can load exactly the nodes a path needs instead of the whole chart.
+The `NODE.inf.json` normalizer and lookup CLI. A repository is charted as a tree of `NODE.inf.json` files, one per directory that carries information beyond its parent; `nodes` formats them into one canonical shape, validates the tree, and answers lookups so a reader (human or model) can load exactly the nodes a path needs instead of the whole chart.
+
+The node files stay out of version control: `nodes init` and `nodes migrate` add `**/*.inf.json` to the root's `.gitignore`, so the tree is local to each checkout.
 
 ## The schema
 
-Every `NODE.json` has exactly these fields, in this order; unknown keys are refused.
+Every `NODE.inf.json` has exactly these fields, in this order; unknown keys are refused.
 
 ```json
 {
@@ -22,7 +24,7 @@ Every `NODE.json` has exactly these fields, in this order; unknown keys are refu
 }
 ```
 
-`path` is the repo-relative directory (`.` for the root). `short` is what `tree` and `ls` print — a noun phrase, no period; `is` is the full sentence. `type` classifies the directory from a closed vocabulary; `tags` label it freely, its categories among them (below). `fs` lists the direct children worth naming; `node: true` means the child carries its own `NODE.json`. `refs` is the only place code points at design: a page id, its title, and what it governs here.
+`path` is the repo-relative directory (`.` for the root). `short` is what `tree` and `ls` print — a noun phrase, no period; `is` is the full sentence. `type` classifies the directory from a closed vocabulary; `tags` label it freely, its categories among them (below). `fs` lists the direct children worth naming; `node: true` means the child carries its own `NODE.inf.json`. `refs` is the only place code points at design: a page id, its title, and what it governs here.
 
 ## Type and tags
 
@@ -31,7 +33,37 @@ Every `NODE.json` has exactly these fields, in this order; unknown keys are refu
 
 The one namespace the tool reads is `category:` — what the directory specifically holds. A node carries at least one, and its categories are ranked from most to least fitting by where they stand among each other, whatever other tags sit between them. `--category ui` is short for `--tag category:ui`; every other namespace is selected through `--tag`.
 
-A tree charted before v0.6.0 ranked its categories in a closed `categories` list. `nodes migrate` rewrites every such file of the tree — `"categories": ["ui", "source"]` becomes `"tags": ["category:ui", "category:source"]` — and is the one command that reads one; a second run changes nothing. A mounted tree is migrated from its own root. (A file from before v0.4.0, missing `type` as well, goes through `nodes classify <path> <type> <category>…`.)
+A tree charted before v0.6.0 ranked its categories in a closed `categories` list; `nodes migrate` turns them into tags (see [Migrating](#migrating)).
+
+## Starting a tree
+
+`nodes init` makes the current directory (or `--root`) a tree's root. It first adds `**/*.inf.json` to that directory's `.gitignore` (creating the file if need be, never adding the line twice), so no node file is ever seen untracked; then, given a type and categories, it seeds the root node — `short` is the directory's name, `is` starts empty, for `nodes set` to fill:
+
+```
+$ nodes init code project tooling
+init: .gitignore
+init: NODE.inf.json
+```
+
+It never walks up to an ancestor's tree, and it is safe to run again: an existing root node is left as it is (a note on stderr says so), and with no type it only sees to the `.gitignore` line.
+
+## Migrating
+
+Up to v0.6 a node lived in a `NODE.json`. `nodes migrate`, run from a tree's root, brings the whole tree up to date in one go:
+
+- the root's `.gitignore` gains `**/*.inf.json`;
+- every `NODE.json` becomes a `NODE.inf.json` beside it, and the `NODE.json` is removed;
+- a file from before v0.6.0 has its ranked `categories` rewritten into tags — `"categories": ["ui", "source"]` becomes `"tags": ["category:ui", "category:source"]`;
+- every file is normalized, like `fmt`.
+
+```
+$ nodes migrate
+migrate: .gitignore
+migrate: NODE.json → NODE.inf.json
+migrate: backend/NODE.json → backend/NODE.inf.json
+```
+
+It is the one command that reads a `NODE.json` or a `categories` list: every other command on a tree whose root still holds a `NODE.json` stops and says to run it. Every file is read before any is written, so one that does not fit stops the run with nothing changed; a directory holding both a `NODE.json` and a `NODE.inf.json` is refused. A second run changes nothing; `--json` lists every file visited as `{file, changed}`, plus `renamed_from` for a moved node. A mounted tree — whichever file holds its root — is migrated from its own root. In git, the renamed files leave the index as deletions: commit them (`git add -A`) and the tree is local from then on. (A file from before v0.4.0, missing `type` as well, goes through `nodes classify <path> <type> <category>…` first.)
 
 ## Commands
 
@@ -46,16 +78,17 @@ A tree charted before v0.6.0 ranked its categories in a closed `categories` list
 | `nodes grep <term> [--limit N]` | search what is charted: case-insensitive full text of the tree's text files — owning node, file, line, text |
 | `nodes recent [path] [--limit N]` | the files modified most recently beneath `path` (default: the root, 10 files), newest first: time (UTC) + file |
 | `nodes resolve <query> [--limit N]` | the nodes and files a partial or slightly-off name most likely means, best first (10 by default) |
-| `nodes fmt [file…]` | normalize in place (default: every `NODE.json`) |
+| `nodes fmt [file…]` | normalize in place (default: every `NODE.inf.json`) |
 | `nodes check [--ref-index FILE]` | validate; exit 1 on any error |
 | `nodes set <path> <field> <json>` | replace one field, then normalize |
 | `nodes add-ref <path> <page> <title> <governs>` / `nodes rm-ref <path> <page>` | ref edits |
 | `nodes classify <path> <type> <category>…` | set `type` and the `category:` tags together (the other tags are kept) — also on a file written before they existed |
-| `nodes migrate` | rewrite every node written before `tags` existed: `categories` become `category:` tags |
+| `nodes init [<type> <category>…]` | make this directory a tree's root: `**/*.inf.json` into `.gitignore`, then — given a type — a root node |
+| `nodes migrate` | bring an older tree up to date: `NODE.json` → `NODE.inf.json`, `categories` → `category:` tags, `**/*.inf.json` into `.gitignore` |
 | `nodes touch <path> [--date YYYY-MM-DD]` | set `charted` to today |
 | `nodes vocabulary` | the closed `type` vocabulary, each term with its meaning (needs no root) |
 
-`--json` on any command emits JSON for machine consumers; a write command prints nothing in text mode and the updated node with `--json`. The repository root is the nearest ancestor of the current directory holding a `NODE.json` whose `path` is `.`; `--root <dir>` overrides.
+`--json` on any command emits JSON for machine consumers; a write command prints nothing in text mode and the updated node with `--json`. The repository root is the nearest ancestor of the current directory holding a `NODE.inf.json` whose `path` is `.` (`init` starts in the current directory instead); `--root <dir>` overrides.
 
 ```
 $ nodes tree
@@ -84,7 +117,7 @@ A node beneath a pass-through directory is named by its path from the parent nod
 
 ## Looking into files
 
-`find` searches the chart; `grep`, `recent` and `resolve` look at what it charts — every regular file the ignore files let through (below), a mounted tree's included. `NODE.json` files are the chart, not content: they are `find`'s. None of the three loads the chart, so one ill-formed node elsewhere never stops a search.
+`find` searches the chart; `grep`, `recent` and `resolve` look at what it charts — every regular file the ignore files let through (below), a mounted tree's included. `NODE.inf.json` files are the chart, not content: they are `find`'s. None of the three loads the chart, so one ill-formed node elsewhere never stops a search.
 
 ```
 $ nodes grep "graceful shutdown"
@@ -103,7 +136,7 @@ contract/schema  [node]
 
 ## Mounts
 
-A directory beneath the root whose own `NODE.json` declares `path: "."` is another tree, **mounted** here — a documents tree and a few repositories under one home-level root, say. A mount is a boundary for writes and validation, and transparent for reads:
+A directory beneath the root whose own `NODE.inf.json` declares `path: "."` is another tree, **mounted** here — a documents tree and a few repositories under one home-level root, say. A mount is a boundary for writes and validation, and transparent for reads:
 
 - `tree`, `ls`, `find`, `chain`, `get`, `refs`, `grep`, `recent` and `resolve` cross into it, mounts within mounts included. Every path printed is relative to the root you asked from, so `nodes --root ~ chain "Life/30 Housing"` runs `.` → `Life` → `Life/30 Housing`. `tree` tags a mounted root `[mount]`; `tree` and `ls` carry `"mount": true|false` with `--json`.
 - `set`, `touch`, `add-ref`, `rm-ref`, `classify`, `fmt` and `migrate` never cross: a path inside a mount is refused (run the command with `--root <the mount>`), and a bare `fmt` or `migrate` rewrites this tree's files only.
@@ -127,7 +160,7 @@ Every walk stays out of:
 - hidden directories (`.name/`), unless a `!.name/` line re-includes them;
 - `.git`, `.jj`, `node_modules` and `target`, always.
 
-The walk that finds `NODE.json` files judges directories only, so a `*.json` line never hides a node. The walks over content (`grep`, `recent`, `resolve`) also judge each file: a pattern such as `*.log` passes it by, and so does a hidden name (`.env`) unless a `!.name` line re-includes it. A line git would not understand is passed over.
+The walk that finds `NODE.inf.json` files judges directories only, so a `*.json` line — or the `**/*.inf.json` that keeps the nodes out of git — never hides a node. The walks over content (`grep`, `recent`, `resolve`) also judge each file: a pattern such as `*.log` passes it by, and so does a hidden name (`.env`) unless a `!.name` line re-includes it. A line git would not understand is passed over.
 
 ## Canonical form
 
@@ -137,7 +170,7 @@ The walk that finds `NODE.json` files judges directories only, so a `*.json` lin
 
 - schema: every file parses, unknown keys are errors, `charted` is a real date, `type` comes from its vocabulary, every tag is well-formed, and `tags` carry at least one `category:` tag and none twice;
 - `path` matches where the file sits;
-- every `fs` entry with `node: true` has a `NODE.json` at that path (a nested name like `src/account/` is allowed, so a pass-through directory needs no node of its own) that the walk reaches — a node that is hidden, ignored or inside a mount is an error — and every node or mount directly beneath another node is listed there with `node: true`;
+- every `fs` entry with `node: true` has a `NODE.inf.json` at that path (a nested name like `src/account/` is allowed, so a pass-through directory needs no node of its own) that the walk reaches — a node that is hidden, ignored or inside a mount is an error — and every node or mount directly beneath another node is listed there with `node: true`;
 - a mount's root node fits the schema; nothing else of a mounted tree is checked (see Mounts);
 - a node cites a page at most once;
 - with `--ref-index <file>`: every cited page appears in that file (a line's first run of digits is its page id), and a page whose line carries the superseded marker (`SUPERSEDED` by default, `--superseded-marker` to change) warns.
