@@ -1,0 +1,79 @@
+{
+  "path": ".",
+  "charted": "2026-10-16",
+  "short": "The NODE.inf.json normalizer and lookup CLI",
+  "is": "nodes — the NODE.inf.json normalizer and lookup CLI: a small Rust program that formats, validates and queries a repository's per-directory NODE.inf.json chart files and its committed NODE.refs.json (Zurfur is the first consumer).",
+  "type": "code",
+  "tags": [
+    "category:project",
+    "category:tooling",
+    "category:source"
+  ],
+  "conventions": [
+    "Rust edition 2024; dependencies are serde, serde_json, clap (derive) and ignore (its gitignore matcher) — nothing else unless it earns its place.",
+    "The schema IS the serde structs (deny_unknown_fields); `nodes fmt` is parse → serialize and must be idempotent.",
+    "A mount — a nested root — is a boundary for writes and check, transparent for reads; every printed path is relative to the root asked from.",
+    "New code follows the Zurfur semantic style rulebook: newtypes for domain-meaningful primitives, named multi-line constructions, combinators over match-plumbing, std traits first, clarity over brevity.",
+    "main is protected; work lands by squash-merged PR from feature/*, bug/* or chore/* branches."
+  ],
+  "entry_points": [
+    "src/main.rs",
+    "src/cli.rs",
+    "src/schema.rs"
+  ],
+  "fs": [
+    {
+      "name": ".chartignore",
+      "role": "dirs the walk skips, gitignore syntax",
+      "node": false
+    },
+    {
+      "name": ".github/",
+      "role": "CI (format · lint · test) and the tag-triggered release workflow",
+      "node": false
+    },
+    {
+      "name": ".gitignore",
+      "role": "ignores target/",
+      "node": false
+    },
+    {
+      "name": ".understand/",
+      "role": "tracked /understand + /remember briefing snapshots",
+      "node": false
+    },
+    {
+      "name": "CLAUDE.md",
+      "role": "how to behave: roles, style rulebook pointer, branch strategy, commits",
+      "node": false
+    },
+    {
+      "name": "Cargo.toml",
+      "role": "the one crate — bin `nodes`, edition 2024; deps clap, ignore, serde, serde_json",
+      "node": false
+    },
+    {
+      "name": "NODE.refs.json",
+      "role": "this tree's refs, committed beside its node files",
+      "node": false
+    },
+    {
+      "name": "README.md",
+      "role": "the schema, the refs file, type and tags, starting a tree (init, a local-only tree), migrating (and the read window), the command table, looking into files, mounts, ignore files, canonical form, check rules, install",
+      "node": false
+    },
+    {
+      "name": "src/",
+      "role": "the CLI: schema.rs (the structs + newtypes), treerefs.rs (a tree's committed NODE.refs.json), tag.rs (free-form tags, the `category:` namespace), vocabulary.rs (the closed type vocabulary), date.rs (the charted day, a file's modified time), ignores.rs (gitignore rules for the walks), repo.rs (discovery, eras, the node walk and the content walk, mounts, atomic read/write), tree.rs, refindex.rs, check.rs, grep.rs (text search in one file), fuzzy.rs (the `resolve` scorer), render.rs, cli.rs",
+      "node": false
+    },
+    {
+      "name": "tests/",
+      "role": "cli.rs — end-to-end runs of the binary over a throwaway charted repo",
+      "node": false
+    }
+  ],
+  "notes": [
+    "The Zurfur repository consumes this tool (`just nodes …`, a PostToolUse hook, and `nodes check` in its gate); that wiring lives in Zurfur, not here."
+  ]
+}
