@@ -1,6 +1,6 @@
-//! `nodes` — the NODE.json normalizer and lookup CLI.
+//! `nodes` — the NODE.inf.json normalizer and lookup CLI.
 //!
-//! A repository is charted as a tree of `NODE.json` files, one per directory
+//! A repository is charted as a tree of `NODE.inf.json` files, one per directory
 //! that carries information beyond its parent. This crate holds the schema
 //! (the serde structs in [`schema`]), the canonical form (`nodes fmt`), the
 //! validation rules (`nodes check`), the read/write commands over the tree, and

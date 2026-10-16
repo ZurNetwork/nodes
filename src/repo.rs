@@ -1,6 +1,7 @@
 //! Where nodes live on disk: root discovery, file discovery, reading and writing.
 
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -8,7 +9,7 @@ use serde::Deserialize;
 
 use crate::error::Error;
 use crate::ignores::IgnoreRules;
-use crate::schema::{NODE_FILE, Node, NodePath};
+use crate::schema::{LEGACY_NODE_FILE, NODE_FILE, NODE_FILES_IGNORED, Node, NodePath};
 
 /// A charted repository, anchored at the directory holding the root node.
 #[derive(Clone, Debug)]
@@ -29,7 +30,7 @@ pub struct LoadedNode {
 /// What a walk of the tree found: its own node files, and the mounts it stopped at.
 #[derive(Debug, Default)]
 pub struct Discovered {
-    /// Every `NODE.json` that belongs to this tree.
+    /// Every node file that belongs to this tree.
     pub node_files: Vec<PathBuf>,
     /// Directories beneath the root that hold a root node of their own: other trees, mounted
     /// here. The walk does not descend into them.
@@ -59,7 +60,7 @@ impl Reach<'_> {
         }
     }
 
-    /// Whether `file` is content the walk keeps. A `NODE.json` never is: it is the chart.
+    /// Whether `file` is content the walk keeps. A `NODE.inf.json` never is: it is the chart.
     fn keeps(self, file: &Path) -> bool {
         match self {
             Self::Nodes => false,
@@ -72,7 +73,36 @@ impl Reach<'_> {
     }
 }
 
-/// The content beneath a directory, across mounts: every regular file that is not a `NODE.json`
+/// One walk's scope: how far beyond the chart it reaches, and which file names are nodes.
+#[derive(Clone, Copy, Debug)]
+struct Walk<'a> {
+    reach: Reach<'a>,
+    names: NodeNames,
+}
+
+/// The file names a walk takes for a node.
+#[derive(Clone, Copy, Debug)]
+enum NodeNames {
+    /// `NODE.inf.json` alone: what every command but `migrate` reads.
+    Current,
+    /// Also the `NODE.json` of a tree from before v0.7: what `migrate` walks.
+    WithLegacy,
+}
+
+impl NodeNames {
+    fn files(self) -> &'static [&'static str] {
+        match self {
+            Self::Current => &[NODE_FILE],
+            Self::WithLegacy => &[NODE_FILE, LEGACY_NODE_FILE],
+        }
+    }
+
+    fn takes(self, name: &OsStr) -> bool {
+        self.files().iter().any(|node_file| name == *node_file)
+    }
+}
+
+/// The content beneath a directory, across mounts: every regular file that is not a `NODE.inf.json`
 /// and that no ignore rule passes by, sorted — and the directories that hold a node, so each file
 /// can be given to the node that owns it.
 #[derive(Debug, Default)]
@@ -84,7 +114,7 @@ pub struct Content {
 }
 
 impl Content {
-    /// The directory of the node that owns `file`: the deepest one above it holding a `NODE.json`.
+    /// The directory of the node that owns `file`: the deepest one above it holding a `NODE.inf.json`.
     pub fn owner_of(&self, file: &Path) -> Option<&Path> {
         file.ancestors()
             .skip(1)
@@ -98,7 +128,7 @@ impl Content {
     }
 }
 
-/// The one field that makes a `NODE.json` a root; the rest of the file need not fit the schema.
+/// The one field that makes a node file a root; the rest of the file need not fit the schema.
 #[derive(Debug, Deserialize)]
 struct DeclaredPath {
     path: NodePath,
@@ -121,7 +151,7 @@ impl LoadedNode {
     }
 }
 
-/// A `NODE.json` that could not be read or does not fit the schema.
+/// A `NODE.inf.json` that could not be read or does not fit the schema.
 #[derive(Debug)]
 pub struct Unreadable {
     pub location: NodePath,
@@ -134,11 +164,13 @@ impl Repo {
         Self { root }
     }
 
-    /// Walks up from `start` to the nearest directory whose `NODE.json` declares `path: "."`.
+    /// Walks up from `start` to the nearest directory whose node file declares `path: "."`. A
+    /// root from before v0.7 (a `NODE.json`) is found too, so `migrate` can reach it and every
+    /// other command can say it needs migrating (see [`Repo::is_unmigrated`]).
     pub fn discover(start: &Path) -> Result<Self, Error> {
         let mut candidate = Some(start);
         while let Some(dir) = candidate {
-            if Self::holds_root_node(dir) {
+            if Self::holds_root_node(dir, NodeNames::WithLegacy) {
                 return Ok(Self::at(dir.to_path_buf()));
             }
             candidate = dir.parent();
@@ -148,20 +180,34 @@ impl Repo {
         })
     }
 
-    /// Whether `dir` holds a root node: a `NODE.json` declaring `path: "."`. Only `path` is read,
+    /// Whether `dir` holds a root node: a node file declaring `path: "."`. Only `path` is read,
     /// so a root that does not fit the schema is still a root — and is reported as one.
-    fn holds_root_node(dir: &Path) -> bool {
-        let Ok(text) = fs::read_to_string(dir.join(NODE_FILE)) else {
-            return false;
-        };
-        serde_json::from_str::<DeclaredPath>(&text).is_ok_and(|declared| declared.path.is_root())
+    fn holds_root_node(dir: &Path, names: NodeNames) -> bool {
+        names.files().iter().any(|node_file| {
+            let Ok(text) = fs::read_to_string(dir.join(node_file)) else {
+                return false;
+            };
+            serde_json::from_str::<DeclaredPath>(&text)
+                .is_ok_and(|declared| declared.path.is_root())
+        })
+    }
+
+    /// Whether the root still holds its node in a `NODE.json` — a tree from before v0.7, which
+    /// only `migrate` reads.
+    pub fn is_unmigrated(&self) -> bool {
+        Self::is_unmigrated_dir(&self.root)
+    }
+
+    /// Whether `dir` holds a `NODE.json` and no `NODE.inf.json`.
+    pub fn is_unmigrated_dir(dir: &Path) -> bool {
+        dir.join(LEGACY_NODE_FILE).is_file() && !dir.join(NODE_FILE).is_file()
     }
 
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// The `NODE.json` of the node at `path`.
+    /// The `NODE.inf.json` of the node at `path`.
     pub fn node_file(&self, path: &NodePath) -> PathBuf {
         path.to_dir(&self.root).join(NODE_FILE)
     }
@@ -192,12 +238,16 @@ impl Repo {
         Ok(dir)
     }
 
-    /// Walks the tree: every `NODE.json` beneath the root that belongs to it, and the mounts the
-    /// walk stopped at. Ignored directories are skipped (see [`IgnoreRules`]).
+    /// Walks the tree: every `NODE.inf.json` beneath the root that belongs to it, and the mounts
+    /// the walk stopped at. Ignored directories are skipped (see [`IgnoreRules`]).
     pub fn walk(&self) -> Result<Discovered, Error> {
         let mut rules = IgnoreRules::default();
         let mut found = Discovered::default();
-        self.collect(&self.root, Reach::Nodes, &mut rules, &mut found)?;
+        let walk = Walk {
+            reach: Reach::Nodes,
+            names: NodeNames::Current,
+        };
+        self.collect(&self.root, walk, &mut rules, &mut found)?;
         Ok(found)
     }
 
@@ -207,8 +257,11 @@ impl Repo {
     pub fn content_across_mounts(&self, start: &Path) -> Result<Content, Error> {
         let mut rules = IgnoreRules::default();
         let mut found = Discovered::default();
-        let reach = Reach::FilesWithin(start);
-        self.collect(&self.root, reach, &mut rules, &mut found)?;
+        let walk = Walk {
+            reach: Reach::FilesWithin(start),
+            names: NodeNames::Current,
+        };
+        self.collect(&self.root, walk, &mut rules, &mut found)?;
         let node_dirs = found
             .node_files
             .iter()
@@ -230,16 +283,30 @@ impl Repo {
         Ok(content)
     }
 
-    /// Every `NODE.json` of this tree — never a mounted tree's.
+    /// Every `NODE.inf.json` of this tree — never a mounted tree's.
     pub fn node_files(&self) -> Result<Vec<PathBuf>, Error> {
         let found = self.walk()?;
+        Ok(found.node_files)
+    }
+
+    /// Every node file of this tree, `NODE.inf.json` or the `NODE.json` of a tree from before
+    /// v0.7: what `migrate` walks. A directory holding a root node of either kind is a mount, and
+    /// is not crossed.
+    pub fn node_files_with_legacy(&self) -> Result<Vec<PathBuf>, Error> {
+        let mut rules = IgnoreRules::default();
+        let mut found = Discovered::default();
+        let walk = Walk {
+            reach: Reach::Nodes,
+            names: NodeNames::WithLegacy,
+        };
+        self.collect(&self.root, walk, &mut rules, &mut found)?;
         Ok(found.node_files)
     }
 
     fn collect(
         &self,
         dir: &Path,
-        reach: Reach<'_>,
+        walk: Walk<'_>,
         rules: &mut IgnoreRules,
         found: &mut Discovered,
     ) -> Result<(), Error> {
@@ -248,13 +315,15 @@ impl Repo {
             .collect::<Result<_, _>>()
             .map_err(|source| Error::io(dir, source))?;
         entries.sort_by_key(fs::DirEntry::file_name);
-        let holds_node = entries.iter().any(|entry| entry.file_name() == NODE_FILE);
-        let is_mount = holds_node && dir != self.root && Self::holds_root_node(dir);
+        let holds_node = entries
+            .iter()
+            .any(|entry| walk.names.takes(&entry.file_name()));
+        let is_mount = holds_node && dir != self.root && Self::holds_root_node(dir, walk.names);
         if is_mount {
             found.mounts.push(dir.to_path_buf());
             return Ok(());
         }
-        if reach.starts_at(dir) {
+        if walk.reach.starts_at(dir) {
             found.reached_start = true;
         }
         rules.enter(dir)?;
@@ -264,19 +333,45 @@ impl Repo {
                 .file_type()
                 .map_err(|source| Error::io(&path, source))?;
             if kind.is_dir() {
-                if rules.skips(&path) || !reach.enters(&path) {
+                if rules.skips(&path) || !walk.reach.enters(&path) {
                     continue;
                 }
-                self.collect(&path, reach, rules, found)?;
-            } else if entry.file_name() == NODE_FILE {
+                self.collect(&path, walk, rules, found)?;
+            } else if walk.names.takes(&entry.file_name()) {
                 // The chart is found whatever the ignore files say about files.
                 found.node_files.push(path);
-            } else if kind.is_file() && reach.keeps(&path) && !rules.skips_file(&path) {
+            } else if kind.is_file() && walk.reach.keeps(&path) && !rules.skips_file(&path) {
                 found.files.push(path);
             }
         }
         rules.leave();
         Ok(())
+    }
+
+    /// Keeps every node file out of version control: appends [`NODE_FILES_IGNORED`] to the
+    /// root's `.gitignore` — creating it if need be — unless a line already says it. `true` when
+    /// the file changed.
+    pub fn ignore_node_files(&self) -> Result<bool, Error> {
+        let file = self.root.join(".gitignore");
+        let current = match fs::read_to_string(&file) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(source) => return Err(Error::io(&file, source)),
+        };
+        let already_ignored = current
+            .lines()
+            .any(|line| line.trim() == NODE_FILES_IGNORED);
+        if already_ignored {
+            return Ok(false);
+        }
+        let mut updated = current;
+        if !updated.is_empty() && !updated.ends_with('\n') {
+            updated.push('\n');
+        }
+        updated.push_str(NODE_FILES_IGNORED);
+        updated.push('\n');
+        fs::write(&file, updated).map_err(|source| Error::io(&file, source))?;
+        Ok(true)
     }
 
     /// The tree mounted at `mount_point`, as a repository of its own.
@@ -289,7 +384,9 @@ impl Repo {
     pub fn mount_holding(&self, path: &NodePath) -> Option<NodePath> {
         std::iter::successors(Some(path.clone()), NodePath::parent)
             .take_while(|location| !location.is_root())
-            .find(|location| Self::holds_root_node(&location.to_dir(&self.root)))
+            .find(|location| {
+                Self::holds_root_node(&location.to_dir(&self.root), NodeNames::Current)
+            })
     }
 
     /// Reads one node file.

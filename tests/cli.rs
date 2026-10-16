@@ -46,7 +46,7 @@ impl TempRepo {
             &[],
             &["Docstrings carry no design pointers; refs do."],
         );
-        repo.write("NODE.json", &root);
+        repo.write("NODE.inf.json", &root);
         let backend = node(
             "backend",
             "The backend.",
@@ -54,7 +54,7 @@ impl TempRepo {
             &[],
             &[],
         );
-        repo.write("backend/NODE.json", &backend);
+        repo.write("backend/NODE.inf.json", &backend);
         let crates = node(
             "backend/crates",
             "Twelve crates in a hexagon.",
@@ -69,7 +69,7 @@ impl TempRepo {
             ],
             &["Adapters depend on domain, never the reverse."],
         );
-        repo.write("backend/crates/NODE.json", &crates);
+        repo.write("backend/crates/NODE.inf.json", &crates);
         let frontend = node(
             "frontend",
             "The client tier.",
@@ -77,7 +77,7 @@ impl TempRepo {
             &[(39_944_194, "Frontend Stack", "SvelteKit")],
             &[],
         );
-        repo.write("frontend/NODE.json", &frontend);
+        repo.write("frontend/NODE.inf.json", &frontend);
         repo.write(
             "docs/index.md",
             "# Index built 2026-06-30\n- `11763713` — Domains and Applications\n- `55836674` — The Application Layer\n- `39944194` — Frontend Stack (SUPERSEDED IN PART by 47939586)\n",
@@ -99,7 +99,7 @@ impl TempRepo {
             &[],
             &[],
         );
-        repo.write("NODE.json", &home);
+        repo.write("NODE.inf.json", &home);
         let life = node(
             ".",
             "Personal documents.",
@@ -110,7 +110,7 @@ impl TempRepo {
             &[],
             &[],
         );
-        repo.write("life/NODE.json", &life);
+        repo.write("life/NODE.inf.json", &life);
         let housing = node(
             "housing",
             "Lease and utilities.",
@@ -118,7 +118,7 @@ impl TempRepo {
             &[(7, "The Lease", "the tenancy")],
             &[],
         );
-        repo.write("life/housing/NODE.json", &housing);
+        repo.write("life/housing/NODE.inf.json", &housing);
         let archive = node(
             ".",
             "Closed years.",
@@ -126,11 +126,11 @@ impl TempRepo {
             &[],
             &[],
         );
-        repo.write("life/archive/NODE.json", &archive);
+        repo.write("life/archive/NODE.inf.json", &archive);
         let year = node("2019", "Everything from 2019.", &[], &[], &[]);
-        repo.write("life/archive/2019/NODE.json", &year);
+        repo.write("life/archive/2019/NODE.inf.json", &year);
         let zurfur = node(".", "The Zurfur monorepo.", &[], &[], &[]);
-        repo.write("code/zurfur/NODE.json", &zurfur);
+        repo.write("code/zurfur/NODE.inf.json", &zurfur);
         repo
     }
 
@@ -181,6 +181,12 @@ impl TempRepo {
         let instant = UNIX_EPOCH + Duration::from_secs(seconds_since_epoch);
         file.set_modified(instant)
             .expect("sets the modification time");
+    }
+
+    /// Moves a node back into the `NODE.json` it lived in up to v0.6.
+    fn unmigrate(&self, dir: &str) {
+        let dir = self.root.join(dir);
+        fs::rename(dir.join("NODE.inf.json"), dir.join("NODE.json")).expect("renames");
     }
 
     fn index_arg(&self) -> String {
@@ -244,10 +250,10 @@ fn fmt_normalizes_once_and_is_then_a_no_op() {
     let messy = r#"{"notes": [], "short": "Messy", "refs": [{"governs": "b", "title": "B", "page": 20}, {"page": 10, "title": "A", "governs": "a"}],
         "fs": [{"name": "z/", "role": "last", "node": false}, {"name": "a/", "role": "first", "node": false}],
         "entry_points": ["x"], "conventions": ["c"], "tags": ["category:tests", "wip", "category:source"], "type": "code", "is": "Messy.", "charted": "2026-01-02", "path": "backend/crates"}"#;
-    repo.write("backend/crates/NODE.json", messy);
+    repo.write("backend/crates/NODE.inf.json", messy);
     let first = repo.ok(&["fmt"]);
-    assert_eq!(first, "fmt: backend/crates/NODE.json\n");
-    let formatted = repo.read("backend/crates/NODE.json");
+    assert_eq!(first, "fmt: backend/crates/NODE.inf.json\n");
+    let formatted = repo.read("backend/crates/NODE.inf.json");
     let expected = nodes::schema::Node::parse(messy)
         .expect("valid")
         .canonical_json();
@@ -261,28 +267,28 @@ fn fmt_normalizes_once_and_is_then_a_no_op() {
     assert!(ten_before_twenty, "refs sorted by page");
     let second = repo.ok(&["fmt"]);
     assert_eq!(second, "", "a second fmt changes nothing");
-    assert_eq!(repo.read("backend/crates/NODE.json"), formatted);
+    assert_eq!(repo.read("backend/crates/NODE.inf.json"), formatted);
 }
 
 #[test]
 fn fmt_takes_files_or_directories_and_refuses_unknown_keys() {
     let repo = TempRepo::charted();
     repo.write(
-        "frontend/NODE.json",
+        "frontend/NODE.inf.json",
         &node("frontend", "The client tier.", &[], &[], &[]).replace("  \"is\"", "\"is\""),
     );
     let by_dir = repo.ok(&["fmt", "frontend"]);
-    assert_eq!(by_dir, "fmt: frontend/NODE.json\n");
-    let json_report = repo.ok(&["--json", "fmt", "frontend/NODE.json"]);
+    assert_eq!(by_dir, "fmt: frontend/NODE.inf.json\n");
+    let json_report = repo.ok(&["--json", "fmt", "frontend/NODE.inf.json"]);
     let parsed: Value = serde_json::from_str(&json_report).expect("json");
     assert_eq!(
         parsed,
-        json!([{"file": "frontend/NODE.json", "changed": false}])
+        json!([{"file": "frontend/NODE.inf.json", "changed": false}])
     );
     let with_extra = node("frontend", "x", &[], &[], &[])
         .replace("\"notes\": []", "\"notes\": [], \"extra\": 1");
-    repo.write("frontend/NODE.json", &with_extra);
-    let (_, stderr) = repo.fails(&["fmt", "frontend/NODE.json"]);
+    repo.write("frontend/NODE.inf.json", &with_extra);
+    let (_, stderr) = repo.fails(&["fmt", "frontend/NODE.inf.json"]);
     assert!(stderr.contains("unknown field `extra`"), "{stderr}");
 }
 
@@ -312,7 +318,7 @@ fn check_reports_every_rule_and_exits_one() {
         &[],
         &[],
     );
-    repo.write("backend/NODE.json", &wrong_path);
+    repo.write("backend/NODE.inf.json", &wrong_path);
     let unlisted = node(
         "frontend/web",
         "Unlisted child.",
@@ -324,14 +330,14 @@ fn check_reports_every_rule_and_exits_one() {
         ],
         &[],
     );
-    repo.write("frontend/web/NODE.json", &unlisted);
-    repo.write("docs/NODE.json", "{ not json");
+    repo.write("frontend/web/NODE.inf.json", &unlisted);
+    repo.write("docs/NODE.inf.json", "{ not json");
     let (stdout, _) = repo.fails(&["check", "--ref-index", &repo.index_arg()]);
     let expected_lines = [
         "error: docs: ",
         "error: backend: path is `backend/elsewhere` but the file sits at `backend`",
-        "error: backend: fs entry `ghost/` says node: true but `backend/ghost` has no NODE.json",
-        "error: backend: fs entry `deep/child/` says node: true but `backend/deep/child` has no NODE.json",
+        "error: backend: fs entry `ghost/` says node: true but `backend/ghost` has no NODE.inf.json",
+        "error: backend: fs entry `deep/child/` says node: true but `backend/deep/child` has no NODE.inf.json",
         "error: frontend/web: not listed in `frontend`'s fs",
         "error: frontend/web: page 11763713 is cited more than once",
         "error: frontend/web: ref 99 (Nowhere) is not in the ref index",
@@ -347,9 +353,9 @@ fn check_reports_every_rule_and_exits_one() {
         &[],
         &[],
     );
-    repo.write("frontend/NODE.json", &listed_false);
+    repo.write("frontend/NODE.inf.json", &listed_false);
     let (stdout, _) = repo.fails(&["check"]);
-    assert!(stdout.contains("error: frontend/web: listed in `frontend`'s fs with node: false, but it has a NODE.json"), "{stdout}");
+    assert!(stdout.contains("error: frontend/web: listed in `frontend`'s fs with node: false, but it has a NODE.inf.json"), "{stdout}");
 }
 
 #[test]
@@ -477,10 +483,10 @@ fn write_commands_edit_one_field_and_leave_canonical_files() {
     assert_eq!(written["charted"], "2031-01-01");
     let silent = repo.ok(&["set", "frontend", "notes", "[]"]);
     assert_eq!(silent, "", "text mode stays silent");
-    let after_edits = repo.read("frontend/NODE.json");
+    let after_edits = repo.read("frontend/NODE.inf.json");
     let refmt = repo.ok(&["fmt", "frontend"]);
     assert_eq!(refmt, "", "every write command leaves a canonical file");
-    assert_eq!(repo.read("frontend/NODE.json"), after_edits);
+    assert_eq!(repo.read("frontend/NODE.inf.json"), after_edits);
 }
 
 #[test]
@@ -521,7 +527,7 @@ fn the_root_is_discovered_from_any_directory_beneath_it() {
         .output()
         .expect("runs");
     assert!(!outside.status.success());
-    assert!(String::from_utf8_lossy(&outside.stderr).contains("no root NODE.json"));
+    assert!(String::from_utf8_lossy(&outside.stderr).contains("no root NODE.inf.json"));
 }
 
 /// The paths `ls` prints, one per node.
@@ -629,7 +635,7 @@ fn check_stops_at_a_mount_and_reads_only_its_root() {
         &[(99, "Nowhere", "not in the outer index")],
         &[],
     );
-    repo.write("life/housing/NODE.json", &mislocated);
+    repo.write("life/housing/NODE.inf.json", &mislocated);
     let report = repo.ok(&["check", "--ref-index", &repo.index_arg()]);
     assert_eq!(report, "1 nodes, 2 mounts, 0 errors, 0 warnings\n");
     let report_json: Value = serde_json::from_str(&repo.ok(&["--json", "check"])).expect("json");
@@ -637,7 +643,7 @@ fn check_stops_at_a_mount_and_reads_only_its_root() {
     assert_eq!(report_json["mounts"], 2);
     let broken_root = node(".", "Personal documents.", &[], &[], &[])
         .replace("\"notes\": []", "\"notes\": [], \"extra\": 1");
-    repo.write("life/NODE.json", &broken_root);
+    repo.write("life/NODE.inf.json", &broken_root);
     let (stdout, _) = repo.fails(&["check"]);
     assert!(stdout.contains("error: life: "), "{stdout}");
     assert!(stdout.contains("unknown field `extra`"), "{stdout}");
@@ -660,14 +666,16 @@ fn a_mount_is_listed_by_its_parent_with_node_true() {
         &[],
         &[],
     );
-    repo.write("NODE.json", &listed_false);
+    repo.write("NODE.inf.json", &listed_false);
     let (stdout, _) = repo.fails(&["check"]);
     assert!(
-        stdout.contains("error: life: listed in `.`'s fs with node: false, but it has a NODE.json"),
+        stdout.contains(
+            "error: life: listed in `.`'s fs with node: false, but it has a NODE.inf.json"
+        ),
         "{stdout}"
     );
     let unlisted = node(".", "Home.", &[], &[], &[]);
-    repo.write("NODE.json", &unlisted);
+    repo.write("NODE.inf.json", &unlisted);
     let (stdout, _) = repo.fails(&["check"]);
     assert!(
         stdout.contains("error: life: not listed in `.`'s fs"),
@@ -684,7 +692,7 @@ fn writes_and_fmt_never_cross_a_mount() {
     let repo = TempRepo::mounting();
     let messy = r#"{"notes": [], "short": "Messy", "refs": [], "fs": [], "entry_points": [],
         "conventions": [], "tags": ["category:housing"], "type": "document", "is": "Messy.", "charted": "2026-01-02", "path": "housing"}"#;
-    repo.write("life/housing/NODE.json", messy);
+    repo.write("life/housing/NODE.inf.json", messy);
     let refused = [
         vec!["set", "life/housing", "short", "Rewritten"],
         vec!["set", "life", "short", "Rewritten"],
@@ -692,7 +700,7 @@ fn writes_and_fmt_never_cross_a_mount() {
         vec!["add-ref", "life/housing", "5", "Early", "sorts first"],
         vec!["rm-ref", "life/housing", "7"],
         vec!["fmt", "life/housing"],
-        vec!["fmt", "life/archive/2019/NODE.json"],
+        vec!["fmt", "life/archive/2019/NODE.inf.json"],
     ];
     for args in &refused {
         let (_, stderr) = repo.fails(args);
@@ -709,7 +717,7 @@ fn writes_and_fmt_never_cross_a_mount() {
     assert_eq!(stderr, innermost);
     let bare = repo.ok(&["fmt"]);
     assert_eq!(bare, "", "a bare fmt formats this tree's files only");
-    assert_eq!(repo.read("life/housing/NODE.json"), messy);
+    assert_eq!(repo.read("life/housing/NODE.inf.json"), messy);
     let life_root = repo.root.join("life");
     let from_its_own_root = Command::new(env!("CARGO_BIN_EXE_nodes"))
         .arg("--root")
@@ -720,7 +728,7 @@ fn writes_and_fmt_never_cross_a_mount() {
     assert!(from_its_own_root.status.success());
     assert_eq!(
         String::from_utf8_lossy(&from_its_own_root.stdout),
-        "fmt: housing/NODE.json\n"
+        "fmt: housing/NODE.inf.json\n"
     );
 }
 
@@ -742,7 +750,7 @@ fn ignore_files_follow_gitignore_semantics() {
         ".github",
         "target",
     ] {
-        repo.write(&format!("{dir}/NODE.json"), &stray(dir));
+        repo.write(&format!("{dir}/NODE.inf.json"), &stray(dir));
     }
     repo.write(".gitignore", "dist/\nvendor/\n");
     repo.write("frontend/.gitignore", "/out/\n");
@@ -795,9 +803,9 @@ fn a_listed_node_the_walk_never_reaches_is_an_error() {
         &[],
         &[],
     );
-    repo.write("NODE.json", &home);
+    repo.write("NODE.inf.json", &home);
     let index = node(".index", "The hidden index.", &[], &[], &[]);
-    repo.write(".index/NODE.json", &index);
+    repo.write(".index/NODE.inf.json", &index);
     let (stdout, _) = repo.fails(&["check"]);
     let expected_lines = [
         "error: .: fs entry `.index/` says node: true but `.index` is hidden or ignored — re-include it with a `!` line in .chartignore, or say node: false",
@@ -848,25 +856,25 @@ fn an_unreadable_ignore_file_stops_the_run() {
 fn nodes_are_classified_by_type_and_ranked_category_tags() {
     let repo = TempRepo::charted();
     let frontend = classified(
-        &repo.read("frontend/NODE.json"),
+        &repo.read("frontend/NODE.inf.json"),
         "code",
         &["category:ui", "category:source"],
     );
-    repo.write("frontend/NODE.json", &frontend);
+    repo.write("frontend/NODE.inf.json", &frontend);
     let crates = classified(
-        &repo.read("backend/crates/NODE.json"),
+        &repo.read("backend/crates/NODE.inf.json"),
         "code",
         &["category:source", "category:tests", "category:ui"],
     );
-    repo.write("backend/crates/NODE.json", &crates);
+    repo.write("backend/crates/NODE.inf.json", &crates);
     let docs = node("docs", "Pointers into the design corpus.", &[], &[], &[]);
     let docs = classified(&docs, "document", &["category:docs", "category:generated"]);
-    repo.write("docs/NODE.json", &docs);
-    let root = classified(&repo.read("NODE.json"), "code", &["category:project"]).replace(
+    repo.write("docs/NODE.inf.json", &docs);
+    let root = classified(&repo.read("NODE.inf.json"), "code", &["category:project"]).replace(
         "\"name\": \"docs/\",\n      \"role\": \"pointers\",\n      \"node\": false",
         "\"name\": \"docs/\",\n      \"role\": \"pointers\",\n      \"node\": true",
     );
-    repo.write("NODE.json", &root);
+    repo.write("NODE.inf.json", &root);
     assert_eq!(repo.ok(&["check"]), "5 nodes, 0 errors, 0 warnings\n");
     assert_eq!(
         repo.ok(&["ls", "--category", "ui"]),
@@ -922,17 +930,17 @@ fn nodes_are_classified_by_type_and_ranked_category_tags() {
 fn nodes_are_selected_by_any_tag() {
     let repo = TempRepo::charted();
     let frontend = classified(
-        &repo.read("frontend/NODE.json"),
+        &repo.read("frontend/NODE.inf.json"),
         "code",
         &["category:ui", "artist:starsie", "wip"],
     );
-    repo.write("frontend/NODE.json", &frontend);
+    repo.write("frontend/NODE.inf.json", &frontend);
     let crates = classified(
-        &repo.read("backend/crates/NODE.json"),
+        &repo.read("backend/crates/NODE.inf.json"),
         "code",
         &["category:source", "wip", "category:ui"],
     );
-    repo.write("backend/crates/NODE.json", &crates);
+    repo.write("backend/crates/NODE.inf.json", &crates);
     assert_eq!(
         repo.ok(&["ls", "--tag", "artist:starsie"]),
         "frontend  The client tier\n",
@@ -1017,9 +1025,9 @@ fn type_is_set_from_its_closed_vocabulary_and_tags_are_set_freely() {
         "{stderr}"
     );
     let unclassified = repo
-        .read("backend/NODE.json")
+        .read("backend/NODE.inf.json")
         .replace("  \"type\": \"code\",\n", "");
-    repo.write("backend/NODE.json", &unclassified);
+    repo.write("backend/NODE.inf.json", &unclassified);
     let (stdout, _) = repo.fails(&["check"]);
     assert!(stdout.contains("error: backend: "), "{stdout}");
     assert!(stdout.contains("missing field `type`"), "{stdout}");
@@ -1064,10 +1072,10 @@ type — what a directory broadly holds: the one kind that fits it best
 fn classify_sets_the_type_and_the_categories_even_where_they_are_missing() {
     let repo = TempRepo::charted();
     let unclassified = repo
-        .read("frontend/NODE.json")
+        .read("frontend/NODE.inf.json")
         .replace("  \"type\": \"code\",\n", "")
         .replace("  \"tags\": [\n    \"category:source\"\n  ],\n", "");
-    repo.write("frontend/NODE.json", &unclassified);
+    repo.write("frontend/NODE.inf.json", &unclassified);
     let (_, stderr) = repo.fails(&["get", "frontend"]);
     assert!(stderr.contains("missing field `type`"), "{stderr}");
     let (_, stderr) = repo.fails(&["set", "frontend", "type", "code"]);
@@ -1111,9 +1119,9 @@ fn classify_sets_the_type_and_the_categories_even_where_they_are_missing() {
     let (_, stderr) = repo.fails(&["classify", "nowhere", "code", "source"]);
     assert_eq!(stderr, "nodes: no node charted at `nowhere`\n");
     let shortless = repo
-        .read("backend/NODE.json")
+        .read("backend/NODE.inf.json")
         .replace("  \"short\": \"The backend\",\n", "");
-    repo.write("backend/NODE.json", &shortless);
+    repo.write("backend/NODE.inf.json", &shortless);
     let (_, stderr) = repo.fails(&["classify", "backend", "code", "source"]);
     assert!(
         stderr.contains("missing field `short`"),
@@ -1130,11 +1138,11 @@ fn classify_sets_the_type_and_the_categories_even_where_they_are_missing() {
 #[test]
 fn migrate_rewrites_ranked_categories_into_category_tags_once() {
     let repo = TempRepo::charted();
-    let legacy = repo.read("frontend/NODE.json").replace(
+    let legacy = repo.read("frontend/NODE.inf.json").replace(
         "  \"tags\": [\n    \"category:source\"\n  ],\n",
         "  \"categories\": [\n    \"ui\",\n    \"source\"\n  ],\n",
     );
-    repo.write("frontend/NODE.json", &legacy);
+    repo.write("frontend/NODE.inf.json", &legacy);
     for refused in [vec!["get", "frontend"], vec!["ls"], vec!["fmt"]] {
         let (_, stderr) = repo.fails(&refused);
         assert!(
@@ -1142,7 +1150,10 @@ fn migrate_rewrites_ranked_categories_into_category_tags_once() {
             "only migrate reads a file from before the tags: {refused:?}: {stderr}"
         );
     }
-    assert_eq!(repo.ok(&["migrate"]), "migrate: frontend/NODE.json\n");
+    assert_eq!(
+        repo.ok(&["migrate"]),
+        "migrate: .gitignore\nmigrate: frontend/NODE.inf.json\n"
+    );
     assert_eq!(
         repo.ok(&["get", "frontend", "tags"]),
         "category:ui\ncategory:source\n",
@@ -1152,23 +1163,121 @@ fn migrate_rewrites_ranked_categories_into_category_tags_once() {
     assert_eq!(repo.ok(&["fmt"]), "", "migrate leaves canonical files");
     assert_eq!(repo.ok(&["check"]), "4 nodes, 0 errors, 0 warnings\n");
     let visited: Value = serde_json::from_str(&repo.ok(&["--json", "migrate"])).expect("json");
-    let frontend_visit = json!({"file": "frontend/NODE.json", "changed": false});
-    assert_eq!(visited[3], frontend_visit);
+    let gitignore_visit = json!({"file": ".gitignore", "changed": false});
+    let frontend_visit = json!({"file": "frontend/NODE.inf.json", "changed": false});
+    assert_eq!(visited[0], gitignore_visit);
+    assert_eq!(visited[4], frontend_visit);
+}
+
+#[test]
+fn migrate_moves_every_node_json_into_a_node_inf_json_and_ignores_them() {
+    let repo = TempRepo::charted();
+    let current_frontend = repo.read("frontend/NODE.inf.json");
+    for dir in [".", "backend", "backend/crates", "frontend"] {
+        repo.unmigrate(dir);
+    }
+    let legacy_frontend = current_frontend.replace(
+        "  \"tags\": [\n    \"category:source\"\n  ],\n",
+        "  \"categories\": [\n    \"source\"\n  ],\n",
+    );
+    repo.write("frontend/NODE.json", &legacy_frontend);
+    repo.write(".gitignore", "/target");
+    for refused in [
+        vec!["ls"],
+        vec!["get", "frontend"],
+        vec!["check"],
+        vec!["fmt"],
+    ] {
+        let (_, stderr) = repo.fails(&refused);
+        assert!(
+            stderr.contains("holds a tree from before v0.7") && stderr.contains("nodes migrate"),
+            "only migrate reads a tree of NODE.json files: {refused:?}: {stderr}"
+        );
+    }
+    let expected_report = [
+        "migrate: .gitignore",
+        "migrate: NODE.json → NODE.inf.json",
+        "migrate: backend/NODE.json → backend/NODE.inf.json",
+        "migrate: backend/crates/NODE.json → backend/crates/NODE.inf.json",
+        "migrate: frontend/NODE.json → frontend/NODE.inf.json",
+        "",
+    ]
+    .join("\n");
+    assert_eq!(repo.ok(&["migrate"]), expected_report);
+    assert_eq!(
+        repo.read(".gitignore"),
+        "/target\n**/*.inf.json\n",
+        "the line is appended, the file's own lines kept"
+    );
+    assert!(!repo.root.join("frontend/NODE.json").exists());
+    assert_eq!(
+        repo.read("frontend/NODE.inf.json"),
+        current_frontend,
+        "an older file is migrated on its way"
+    );
+    assert_eq!(repo.ok(&["check"]), "4 nodes, 0 errors, 0 warnings\n");
+    assert_eq!(repo.ok(&["migrate"]), "", "a second run changes nothing");
+    assert_eq!(
+        repo.read(".gitignore"),
+        "/target\n**/*.inf.json\n",
+        "the line is added once"
+    );
+}
+
+#[test]
+fn migrate_reports_a_rename_in_json() {
+    let repo = TempRepo::charted();
+    repo.unmigrate("frontend");
+    let visited: Value = serde_json::from_str(&repo.ok(&["--json", "migrate"])).expect("json");
+    let renamed = json!({
+        "file": "frontend/NODE.inf.json",
+        "renamed_from": "frontend/NODE.json",
+        "changed": true,
+    });
+    assert_eq!(visited[4], renamed);
+}
+
+#[test]
+fn migrate_refuses_a_directory_holding_both_files_and_changes_nothing() {
+    let repo = TempRepo::charted();
+    let frontend = repo.read("frontend/NODE.inf.json");
+    repo.write("frontend/NODE.json", &frontend);
+    let (_, stderr) = repo.fails(&["migrate"]);
+    assert!(
+        stderr.contains("holds both NODE.json and NODE.inf.json"),
+        "{stderr}"
+    );
+    assert!(
+        !repo.root.join(".gitignore").exists(),
+        "nothing is written before every file is read"
+    );
+    let unreadable = "{ not json";
+    repo.write("frontend/NODE.json", unreadable);
+    repo.unmigrate("backend");
+    fs::remove_file(repo.root.join("frontend/NODE.inf.json")).expect("removed");
+    let (_, stderr) = repo.fails(&["migrate"]);
+    assert!(stderr.contains("frontend/NODE.json"), "{stderr}");
+    assert!(
+        repo.root.join("backend/NODE.json").is_file(),
+        "a file that does not fit stops the run before any rename"
+    );
 }
 
 #[test]
 fn migrate_leaves_a_mounted_tree_to_its_own_root() {
     let repo = TempRepo::mounting();
-    let legacy = repo.read("life/housing/NODE.json").replace(
-        "  \"tags\": [\n    \"category:source\"\n  ],\n",
-        "  \"categories\": [\n    \"housing\"\n  ],\n",
+    for dir in ["life", "life/housing", "life/archive", "life/archive/2019"] {
+        repo.unmigrate(dir);
+    }
+    let (stdout, _) = repo.fails(&["check"]);
+    assert!(
+        stdout.contains("error: .: fs entry `life/` says node: true but `life` holds a NODE.json from before v0.7 — run `nodes migrate`"),
+        "{stdout}"
     );
-    repo.write("life/housing/NODE.json", &legacy);
-    assert_eq!(repo.ok(&["migrate"]), "");
-    assert_eq!(
-        repo.read("life/housing/NODE.json"),
-        legacy,
-        "writes never cross a mount"
+    assert_eq!(repo.ok(&["migrate"]), "migrate: .gitignore\n");
+    assert!(
+        repo.root.join("life/housing/NODE.json").is_file(),
+        "writes never cross a mount, whichever file holds its root"
     );
     let life_root = repo.root.join("life");
     let from_its_own_root = Command::new(env!("CARGO_BIN_EXE_nodes"))
@@ -1178,27 +1287,108 @@ fn migrate_leaves_a_mounted_tree_to_its_own_root() {
         .output()
         .expect("runs");
     assert!(from_its_own_root.status.success());
+    let expected_report = [
+        "migrate: .gitignore",
+        "migrate: NODE.json → NODE.inf.json",
+        "migrate: housing/NODE.json → housing/NODE.inf.json",
+        "",
+    ]
+    .join("\n");
     assert_eq!(
         String::from_utf8_lossy(&from_its_own_root.stdout),
-        "migrate: housing/NODE.json\n"
+        expected_report
     );
+    assert!(
+        repo.root.join("life/archive/NODE.json").is_file(),
+        "the mount within is its own to migrate too"
+    );
+}
+
+#[test]
+fn init_ignores_the_node_files_then_seeds_a_root_node() {
+    let repo = TempRepo::new();
+    assert_eq!(repo.ok(&["init"]), "init: .gitignore\n");
+    assert_eq!(repo.read(".gitignore"), "**/*.inf.json\n");
+    assert!(
+        !repo.root.join("NODE.inf.json").exists(),
+        "without a type, no node is seeded"
+    );
+    let (_, stderr) = repo.fails(&["init", "code"]);
+    assert!(
+        stderr.contains("CATEGORY"),
+        "a type needs its categories: {stderr}"
+    );
+    assert_eq!(
+        repo.ok(&["init", "code", "project", "tooling"]),
+        "init: NODE.inf.json\n",
+        "the .gitignore line is already there"
+    );
+    let dir_name = repo
+        .root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("a UTF-8 temp dir");
+    assert_eq!(repo.ok(&["get", ".", "short"]), format!("{dir_name}\n"));
+    assert_eq!(
+        repo.ok(&["get", ".", "tags"]),
+        "category:project\ncategory:tooling\n"
+    );
+    assert_eq!(repo.ok(&["check"]), "1 nodes, 0 errors, 0 warnings\n");
+    repo.ok(&["set", ".", "is", "A tree."]);
+    let after_set = repo.read("NODE.inf.json");
+    let rerun = repo.nodes(&["init", "data", "archive"]);
+    assert!(rerun.status.success());
+    assert_eq!(String::from_utf8_lossy(&rerun.stdout), "");
+    assert!(String::from_utf8_lossy(&rerun.stderr).contains("already there: left as it is"));
+    assert_eq!(
+        repo.read("NODE.inf.json"),
+        after_set,
+        "an existing node is never overwritten"
+    );
+    let visited: Value = serde_json::from_str(&repo.ok(&["--json", "init"])).expect("json");
+    let gitignore_visit = json!([{"file": ".gitignore", "changed": false}]);
+    assert_eq!(visited, gitignore_visit);
+}
+
+#[test]
+fn init_starts_where_it_is_told_and_refuses_an_unmigrated_tree() {
+    let repo = TempRepo::charted();
+    let below = Command::new(env!("CARGO_BIN_EXE_nodes"))
+        .current_dir(repo.root.join("backend"))
+        .args(["init"])
+        .output()
+        .expect("runs");
+    assert!(below.status.success());
+    assert!(
+        repo.root.join("backend/.gitignore").is_file(),
+        "init never walks up to an ancestor's tree"
+    );
+    let fresh = TempRepo::new();
+    let (_, stderr) = fresh.fails(&["init", "code", "project", "project"]);
+    assert!(
+        stderr.contains("`category:project` is tagged more than once"),
+        "{stderr}"
+    );
+    repo.unmigrate(".");
+    let (_, stderr) = repo.fails(&["init"]);
+    assert!(stderr.contains("run `nodes migrate`"), "{stderr}");
 }
 
 #[test]
 fn a_filtered_tree_keeps_the_matches_and_the_ancestors_that_lead_to_them() {
     let repo = TempRepo::charted();
     let frontend = classified(
-        &repo.read("frontend/NODE.json"),
+        &repo.read("frontend/NODE.inf.json"),
         "code",
         &["category:ui", "category:source"],
     );
-    repo.write("frontend/NODE.json", &frontend);
+    repo.write("frontend/NODE.inf.json", &frontend);
     let crates = classified(
-        &repo.read("backend/crates/NODE.json"),
+        &repo.read("backend/crates/NODE.inf.json"),
         "document",
         &["category:docs", "category:ui"],
     );
-    repo.write("backend/crates/NODE.json", &crates);
+    repo.write("backend/crates/NODE.inf.json", &crates);
     let by_category = "\
 .
 ├── backend
@@ -1248,11 +1438,11 @@ fn a_filtered_tree_keeps_the_matches_and_the_ancestors_that_lead_to_them() {
 fn a_filtered_tree_reaches_into_mounts() {
     let repo = TempRepo::mounting();
     let housing = classified(
-        &repo.read("life/housing/NODE.json"),
+        &repo.read("life/housing/NODE.inf.json"),
         "document",
         &["category:housing", "category:legal"],
     );
-    repo.write("life/housing/NODE.json", &housing);
+    repo.write("life/housing/NODE.inf.json", &housing);
     let drawn = "\
 .
 └── life  [mount]
@@ -1284,7 +1474,7 @@ backend/crates  backend/crates/api/src/lib.rs:4: // graceful, again
     assert_eq!(
         repo.ok(&["grep", "hexagon"]),
         "",
-        "NODE.json is the chart: find searches it, grep does not"
+        "NODE.inf.json is the chart: find searches it, grep does not"
     );
     assert_eq!(
         repo.ok(&["grep", "graceful", "--limit", "1"]),
@@ -1361,7 +1551,7 @@ fn recent_lists_the_newest_files_first_and_ties_by_name() {
     assert_eq!(
         repo.ok(&["recent"]),
         newest_first,
-        "NODE.json files are the chart, not content: a charting run does not flood the list"
+        "NODE.inf.json files are the chart, not content: a charting run does not flood the list"
     );
     assert_eq!(
         repo.ok(&["recent", "--limit", "1"]),

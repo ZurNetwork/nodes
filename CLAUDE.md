@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-`nodes` is the NODE.json normalizer and lookup CLI: a small Rust program that formats, validates and queries a repository's per-directory `NODE.json` chart files. Zurfur is its first consumer; the tool itself knows nothing about Zurfur beyond the schema.
+`nodes` is the NODE.inf.json normalizer and lookup CLI: a small Rust program that formats, validates and queries a repository's per-directory `NODE.inf.json` chart files (gitignored via `**/*.inf.json`, so the tree is local to each checkout). Zurfur is its first consumer; the tool itself knows nothing about Zurfur beyond the schema.
 
 The human is the Engineer and owns every decision; Claude proposes. Field names, check severities and output shapes are the Engineer's call.
 

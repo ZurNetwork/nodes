@@ -146,7 +146,7 @@ fn tag_words(node: &Node) -> Vec<String> {
         .collect()
 }
 
-/// What follows a name that carries its own `NODE.json`.
+/// What follows a name that carries its own `NODE.inf.json`.
 pub const NODE_MARKER: &str = "  [node]";
 
 fn fs_line(entry: &FsEntry) -> String {

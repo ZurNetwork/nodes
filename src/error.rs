@@ -9,11 +9,16 @@ use crate::schema::{Field, NodePath, PageId};
 /// Everything that can stop a command.
 #[derive(Debug)]
 pub enum Error {
-    /// No ancestor of the starting directory holds a root `NODE.json` (one whose `path` is `.`).
+    /// No ancestor of the starting directory holds a root `NODE.inf.json` (one whose `path` is `.`).
     NoRoot { start: PathBuf },
+    /// The root holds its node in a `NODE.json`: a tree from before v0.7, which only `migrate` reads.
+    Unmigrated { root: PathBuf },
+    /// A directory holds a node twice, in a `NODE.json` and a `NODE.inf.json`: `migrate` will not
+    /// choose between them.
+    TwoNodeFiles { dir: PathBuf },
     /// A file or directory could not be read, written or listed.
     Io { path: PathBuf, source: io::Error },
-    /// A `NODE.json` does not fit the schema.
+    /// A node file does not fit the schema.
     Schema {
         file: PathBuf,
         source: serde_json::Error,
@@ -62,8 +67,18 @@ impl fmt::Display for Error {
         match self {
             Self::NoRoot { start } => write!(
                 f,
-                "no root NODE.json (one whose path is \".\") in {} or any parent; pass --root",
+                "no root NODE.inf.json (one whose path is \".\") in {} or any parent; pass --root, or start a tree with `nodes init`",
                 start.display()
+            ),
+            Self::Unmigrated { root } => write!(
+                f,
+                "{} holds a tree from before v0.7 (its nodes are NODE.json files); run `nodes migrate` there",
+                root.display()
+            ),
+            Self::TwoNodeFiles { dir } => write!(
+                f,
+                "{} holds both NODE.json and NODE.inf.json; delete the one that is out of date, then migrate",
+                dir.display()
             ),
             Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
             Self::Schema { file, source } => write!(f, "{}: {source}", file.display()),

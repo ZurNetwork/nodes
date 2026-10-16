@@ -1,4 +1,4 @@
-//! The schema IS these structs: a `NODE.json` is exactly one [`Node`], unknown keys refused.
+//! The schema IS these structs: a `NODE.inf.json` is exactly one [`Node`], unknown keys refused.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -12,7 +12,13 @@ pub use crate::tag::{Tag, Tags};
 pub use crate::vocabulary::NodeType;
 
 /// The file name every node lives in.
-pub const NODE_FILE: &str = "NODE.json";
+pub const NODE_FILE: &str = "NODE.inf.json";
+
+/// The file name a node lived in up to v0.6; `nodes migrate` is the one command that reads one.
+pub const LEGACY_NODE_FILE: &str = "NODE.json";
+
+/// The `.gitignore` line that keeps every node file out of version control.
+pub const NODE_FILES_IGNORED: &str = "**/*.inf.json";
 
 /// The key a node file ranked its categories under before `tags` existed (up to v0.5).
 const LEGACY_CATEGORIES_KEY: &str = "categories";
@@ -53,7 +59,7 @@ pub struct Node {
 pub struct FsEntry {
     pub name: String,
     pub role: String,
-    /// Whether the child carries its own `NODE.json`.
+    /// Whether the child carries its own `NODE.inf.json`.
     pub node: bool,
 }
 
@@ -67,7 +73,7 @@ pub struct Ref {
 }
 
 impl Node {
-    /// Parses one `NODE.json`; unknown keys, wrong types, bad dates and bad paths are all schema errors.
+    /// Parses one `NODE.inf.json`; unknown keys, wrong types, bad dates and bad paths are all schema errors.
     pub fn parse(text: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(text)
     }
@@ -365,7 +371,7 @@ impl NodePath {
     }
 
     /// Turns a typed path — repo-relative as `nodes tree` prints it, or absolute — into a node
-    /// path, tolerating `./`, a trailing `/` and a trailing `/NODE.json`.
+    /// path, tolerating `./`, a trailing `/` and a trailing `/NODE.inf.json`.
     pub fn normalize(input: &str, root: &Path) -> Result<Self, PathError> {
         let outside = || PathError::OutsideRepo(input.to_owned());
         let given = Path::new(input);
@@ -731,8 +737,8 @@ mod tests {
             "backend/crates",
             "backend/crates/",
             "./backend/crates",
-            "backend/crates/NODE.json",
-            "/repo/backend/crates/NODE.json",
+            "backend/crates/NODE.inf.json",
+            "/repo/backend/crates/NODE.inf.json",
             "backend/x/../crates",
         ] {
             let normalized = NodePath::normalize(input, root).expect(input);
@@ -741,7 +747,7 @@ mod tests {
         assert_eq!(NodePath::normalize("", root), Ok(NodePath::root()));
         assert_eq!(NodePath::normalize(".", root), Ok(NodePath::root()));
         assert_eq!(
-            NodePath::normalize("/repo/NODE.json", root),
+            NodePath::normalize("/repo/NODE.inf.json", root),
             Ok(NodePath::root())
         );
         assert!(NodePath::normalize("/elsewhere/x", root).is_err());
