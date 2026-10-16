@@ -43,7 +43,7 @@ Every `NODE.inf.json` has exactly these fields, in this order; unknown keys — 
 }
 ```
 
-Each key is a node's path; each ref is a page id, its title, and what it governs there. A path that cites nothing has no entry, and a tree that cites nothing has no file. `add-ref`, `rm-ref` and `set <path> refs` write it; `get`, `chain`, `find` and every `--json` node carry each node's refs, so a reader never opens it. `nodes refs <page>` and `nodes check` read it with no node tree present. Leave its formatting to `nodes fmt`.
+Each key is a node's path; each ref is a page id, its title, and what it governs there. A path that cites nothing has no entry, and a tree that cites nothing has no file. `add-ref`, `rm-ref` and `set <path> refs` write it; `get`, `chain`, `find` and every `--json` node carry each node's refs, so a reader never opens it. `nodes refs <page>` and `nodes check` read it with no node tree present, and in such a checkout — a worktree, a fresh clone — `add-ref` and `rm-ref` edit it alone (for any directory there), so a ref change ships in the same commit as the code it describes. Leave its formatting to `nodes fmt`.
 
 ## Type and tags
 
@@ -119,7 +119,7 @@ migrate: backend/NODE.json → backend/NODE.inf.json
 | `nodes fmt [file…]` | normalize in place (default: every `NODE.inf.json`, and `NODE.refs.json`) |
 | `nodes check [--ref-index FILE]` | validate; exit 1 on any error. With no node tree here, the refs file alone |
 | `nodes set <path> <field> <json>` | replace one field, then normalize |
-| `nodes add-ref <path> <page> <title> <governs>` / `nodes rm-ref <path> <page>` | ref edits, into `NODE.refs.json` |
+| `nodes add-ref <path> <page> <title> <governs>` / `nodes rm-ref <path> <page>` | ref edits, into `NODE.refs.json` — with no node tree here, for any directory |
 | `nodes classify <path> <type> <category>…` | set `type` and the `category:` tags together (the other tags are kept) — also on a file written before they existed, and on a tree that has not migrated yet |
 | `nodes init [--no-gitignore] [<type> <category>…]` | make this directory a tree's root: `**/*.inf.json` into `.gitignore`, then — given a type — a root node |
 | `nodes migrate [--no-gitignore]` | bring an older tree up to date: `NODE.json` → `NODE.inf.json`, refs → `NODE.refs.json`, `categories` → `category:` tags, `**/*.inf.json` into `.gitignore` |

@@ -1022,19 +1022,40 @@ fn add_ref(
     governs: String,
     output: Output,
 ) -> Result<ExitCode, Error> {
-    let mut loaded = read_own_node(repo, input)?;
-    loaded.node.refs.retain(|reference| reference.page != page);
     let added = Ref {
         page,
         title,
         governs,
     };
+    if let Some(path) = refs_alone_target(repo, input)? {
+        let mut refs = repo.load_refs()?;
+        let mut cited = refs.of(&path).to_vec();
+        cited.retain(|reference| reference.page != page);
+        cited.push(added);
+        refs.set(path.clone(), cited);
+        repo.write_refs(&refs)?;
+        return refs_written(&refs, &path, output);
+    }
+    let mut loaded = read_own_node(repo, input)?;
+    loaded.node.refs.retain(|reference| reference.page != page);
     loaded.node.refs.push(added);
     repo.write(&loaded.file, &loaded.node)?;
     output.written(&loaded.node)
 }
 
 fn rm_ref(repo: &Repo, input: &str, page: PageId, output: Output) -> Result<ExitCode, Error> {
+    if let Some(path) = refs_alone_target(repo, input)? {
+        let mut refs = repo.load_refs()?;
+        let mut cited = refs.of(&path).to_vec();
+        let before = cited.len();
+        cited.retain(|reference| reference.page != page);
+        if cited.len() == before {
+            return Err(Error::RefNotCited { path, page });
+        }
+        refs.set(path.clone(), cited);
+        repo.write_refs(&refs)?;
+        return refs_written(&refs, &path, output);
+    }
     let mut loaded = read_own_node(repo, input)?;
     let before = loaded.node.refs.len();
     loaded.node.refs.retain(|reference| reference.page != page);
@@ -1046,6 +1067,35 @@ fn rm_ref(repo: &Repo, input: &str, page: PageId, output: Output) -> Result<Exit
     }
     repo.write(&loaded.file, &loaded.node)?;
     output.written(&loaded.node)
+}
+
+/// In a checkout with no node tree — a worktree, a fresh clone — a ref edit goes to
+/// `NODE.refs.json` alone, so it ships in the same commit as the code it describes: the directory
+/// it is for, which must exist. `None` where a node tree is here, and the edit goes through the
+/// node as usual.
+fn refs_alone_target(repo: &Repo, input: &str) -> Result<Option<NodePath>, Error> {
+    if repo.node_file(&NodePath::root()).is_file() {
+        return Ok(None);
+    }
+    let path = repo.node_path(input)?;
+    refuse_inside_mount(repo, &path)?;
+    if !path.to_dir(repo.root()).is_dir() {
+        let not_a_directory = Error::InvalidPath {
+            input: input.to_owned(),
+            reason: "not a directory".to_owned(),
+        };
+        return Err(not_a_directory);
+    }
+    Ok(Some(path))
+}
+
+/// After a ref edit with no node tree: silent in text mode, the path's refs in JSON mode.
+fn refs_written(refs: &TreeRefs, path: &NodePath, output: Output) -> Result<ExitCode, Error> {
+    if output.json {
+        let value = json!({ "path": path, "refs": refs.of(path) });
+        return output.emit(&value, "");
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// One term of a closed vocabulary, as `nodes vocabulary` lists it.

@@ -1508,6 +1508,27 @@ fn a_checkout_with_refs_and_no_node_tree_checks_and_answers_its_refs() {
     );
     let (_, stderr) = repo.fails(&["ls"]);
     assert!(stderr.contains("but no nodes"), "{stderr}");
+    repo.ok(&[
+        "add-ref",
+        "backend",
+        "11763713",
+        "Domains and Applications",
+        "the layers",
+    ]);
+    repo.ok(&["rm-ref", "frontend", "39944194"]);
+    assert_eq!(
+        repo.ok(&["refs", "11763713"]),
+        "backend  Domains and Applications — the layers\nbackend/crates  Domains and Applications — the dependency rule\n",
+        "a worktree records its ref changes in NODE.refs.json, to ship with its code"
+    );
+    let edited: Value =
+        serde_json::from_str(&repo.ok(&["--json", "add-ref", "backend", "5", "Five", "x"]))
+            .expect("json");
+    assert_eq!(edited["path"], "backend");
+    assert_eq!(edited["refs"][0]["page"], 5);
+    let (_, stderr) = repo.fails(&["add-ref", "nowhere", "1", "One", "x"]);
+    assert!(stderr.contains("not a directory"), "{stderr}");
+    repo.ok(&["rm-ref", "backend", "5"]);
     repo.cite(
         ".",
         "gone",

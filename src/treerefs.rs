@@ -29,13 +29,15 @@ impl TreeRefs {
         self.0.get(path).map_or(&[], Vec::as_slice)
     }
 
-    /// Replaces the refs of the node at `path`; with none, the entry goes.
-    pub fn set(&mut self, path: NodePath, refs: Vec<Ref>) {
+    /// Replaces the refs of the node at `path`, kept in canonical order (by `page`); with none,
+    /// the entry goes.
+    pub fn set(&mut self, path: NodePath, mut refs: Vec<Ref>) {
         if refs.is_empty() {
             self.0.remove(&path);
-        } else {
-            self.0.insert(path, refs);
+            return;
         }
+        refs.sort_by_key(|reference| reference.page);
+        self.0.insert(path, refs);
     }
 
     pub fn is_empty(&self) -> bool {
