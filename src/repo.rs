@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
-use std::io;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -735,8 +735,10 @@ fn read_if_present(file: &Path) -> Result<Option<String>, Error> {
 }
 
 /// Writes `text` to `file` unless it already holds it; `true` when it did. The text goes to a
-/// hidden file beside it first, then is renamed into place, so a concurrent reader sees the old
-/// file or the new one, never half of one. A symlink is refused rather than followed.
+/// hidden file beside it first — created afresh, so nothing already at that name (a symlink, say)
+/// is followed, and flushed to disk — then is renamed into place, so a concurrent reader, or a
+/// crash, sees the old file or the new one, never half of one. A symlink is refused rather than
+/// followed.
 fn write_if_changed(file: &Path, text: &str) -> Result<bool, Error> {
     refuse_symlink(file)?;
     let current = read_if_present(file)?;
@@ -748,7 +750,21 @@ fn write_if_changed(file: &Path, text: &str) -> Result<bool, Error> {
         .map(OsStr::to_string_lossy)
         .unwrap_or_default();
     let temporary = file.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
-    fs::write(&temporary, text).map_err(|source| Error::io(&temporary, source))?;
+    let written = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .and_then(|mut handle| {
+            handle.write_all(text.as_bytes())?;
+            handle.sync_all()
+        });
+    if let Err(source) = written {
+        // What was already at the temporary name is not ours to remove.
+        if source.kind() != io::ErrorKind::AlreadyExists {
+            let _ = fs::remove_file(&temporary);
+        }
+        return Err(Error::io(&temporary, source));
+    }
     fs::rename(&temporary, file).map_err(|source| {
         let _ = fs::remove_file(&temporary);
         Error::io(file, source)
