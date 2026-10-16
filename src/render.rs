@@ -1,6 +1,7 @@
-//! Plain-text renderings of nodes and trees.
+//! Plain-text renderings of nodes and trees, and the notes a run leaves on stderr.
 
 use std::fmt::Write as _;
+use std::io::{self, Write as _};
 
 use crate::repo::LoadedNode;
 use crate::schema::{Field, FsEntry, Node, NodeType, Ref};
@@ -159,4 +160,10 @@ fn ref_line(reference: &Ref) -> String {
         "{}  {} — {}",
         reference.page, reference.title, reference.governs
     )
+}
+
+/// Says on stderr what a run passed over or worked around, so a quiet answer is never mistaken
+/// for a complete one. A reader that went away is no reason to fail.
+pub fn note(message: &str) {
+    let _ = writeln!(io::stderr().lock(), "nodes: {message}");
 }

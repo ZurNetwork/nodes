@@ -7,9 +7,10 @@ use serde::Serialize;
 
 use crate::error::Error;
 use crate::refindex::RefIndex;
-use crate::repo::{LoadedNode, Repo};
-use crate::schema::{NODE_FILE, NodePath, PageId};
+use crate::repo::{Era, LoadedNode, Repo};
+use crate::schema::{NodePath, PageId, REFS_FILE, Ref};
 use crate::tree::NodeTree;
+use crate::treerefs::TreeRefs;
 
 /// How bad a finding is: errors fail the check, warnings do not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -33,6 +34,11 @@ pub struct Report {
     pub nodes: usize,
     /// The trees mounted beneath this one; only their root nodes were read.
     pub mounts: usize,
+    /// The refs checked, wherever the tree keeps them.
+    pub refs: usize,
+    /// Whether a node tree was here. Without one — a fresh clone, CI — only the tree's
+    /// `NODE.refs.json` was checked.
+    pub tree: bool,
     pub errors: usize,
     pub warnings: usize,
     pub findings: Vec<Finding>,
@@ -63,59 +69,130 @@ impl std::fmt::Display for Severity {
 }
 
 /// Runs every rule over the repository's own nodes. A mounted tree is another tree's business:
-/// only its root node is read, and its refs are never held against this tree's index.
+/// only its root node is read, and its refs are never held against this tree's index. A checkout
+/// that holds the tree's `NODE.refs.json` but no nodes — node files are never committed — gets its
+/// refs checked alone.
 pub fn check(repo: &Repo, options: &CheckOptions) -> Result<Report, Error> {
+    repo.note_if_unmigrated();
+    let ref_index = options
+        .ref_index
+        .as_deref()
+        .map(|file| RefIndex::load(file, &options.superseded_marker))
+        .transpose()?;
+    let mut findings: Vec<Finding> = Vec::new();
+    let refs = match repo.era() {
+        Era::Current => repo.load_refs().unwrap_or_else(|unreadable| {
+            findings.push(error_at(&NodePath::root(), unreadable.to_string()));
+            TreeRefs::default()
+        }),
+        Era::Legacy => TreeRefs::default(),
+    };
     let found = repo.walk()?;
+    let holds_refs_alone =
+        found.node_files.is_empty() && repo.era() == Era::Current && repo.refs_file().is_file();
+    if holds_refs_alone {
+        let report = check_refs_alone(repo, &refs, ref_index.as_ref(), findings);
+        return Ok(report);
+    }
     let reached: BTreeSet<NodePath> = found
         .node_files
         .iter()
         .chain(&found.mounts)
         .map(|reached| repo.location_of(reached))
         .collect::<Result<_, _>>()?;
-    let (loaded, unreadable) = repo.read_lenient(&found.node_files)?;
-    let mut findings: Vec<Finding> = unreadable
-        .into_iter()
-        .map(|broken| Finding {
-            severity: Severity::Error,
-            path: broken.location,
-            message: broken.error.to_string(),
-        })
-        .collect();
+    let (loaded, unreadable) = repo.read_lenient(&found.node_files, &refs)?;
+    let broken = unreadable.into_iter().map(|broken| Finding {
+        severity: Severity::Error,
+        path: broken.location,
+        message: broken.error.to_string(),
+    });
+    findings.extend(broken);
     let tree = NodeTree::from_nodes(loaded);
     if tree.root().is_none() {
-        findings.push(Finding {
-            severity: Severity::Error,
-            path: NodePath::root(),
-            message: "no root node: a NODE.inf.json whose path is \".\" must sit at the root"
-                .to_owned(),
-        });
+        let message = format!(
+            "no root node: a {} whose path is \".\" must sit at the root",
+            repo.era().node_file()
+        );
+        findings.push(error_at(&NodePath::root(), message));
     }
-    let ref_index = options
-        .ref_index
-        .as_deref()
-        .map(|file| RefIndex::load(file, &options.superseded_marker))
-        .transpose()?;
     for node in tree.iter() {
         check_path(node, &mut findings);
         check_fs_children(repo, &reached, node, &mut findings);
         check_listed_by_ancestor(&tree, &node.location, &mut findings);
-        check_refs(node, ref_index.as_ref(), &mut findings);
+        check_refs(
+            &node.location,
+            &node.node.refs,
+            ref_index.as_ref(),
+            &mut findings,
+        );
+    }
+    for (path, cited) in refs.iter() {
+        if tree.get(path).is_some() {
+            continue;
+        }
+        check_refs_path(repo, path, &mut findings);
+        check_refs(path, cited, ref_index.as_ref(), &mut findings);
     }
     for mount_dir in &found.mounts {
         check_mount(repo, &tree, mount_dir, &mut findings)?;
     }
+    let cited = tree.iter().map(|node| node.node.refs.len()).sum::<usize>()
+        + refs
+            .iter()
+            .filter(|(path, _)| tree.get(path).is_none())
+            .map(|(_, cited)| cited.len())
+            .sum::<usize>();
+    let report = report(tree.len(), found.mounts.len(), cited, true, findings);
+    Ok(report)
+}
+
+/// What a checkout with no node tree can check: its `NODE.refs.json` — every path a directory
+/// here, every page cited once per path, and, given an index, every page in it.
+fn check_refs_alone(
+    repo: &Repo,
+    refs: &TreeRefs,
+    index: Option<&RefIndex>,
+    mut findings: Vec<Finding>,
+) -> Report {
+    for (path, cited) in refs.iter() {
+        if !path.to_dir(repo.root()).is_dir() {
+            let message =
+                format!("{REFS_FILE} cites pages for `{path}`, which is not a directory here");
+            findings.push(error_at(path, message));
+        }
+        check_refs(path, cited, index, &mut findings);
+    }
+    report(0, 0, refs.count(), false, findings)
+}
+
+fn report(nodes: usize, mounts: usize, refs: usize, tree: bool, findings: Vec<Finding>) -> Report {
     let errors = findings
         .iter()
         .filter(|finding| finding.severity == Severity::Error)
         .count();
-    let report = Report {
-        nodes: tree.len(),
-        mounts: found.mounts.len(),
+    Report {
+        nodes,
+        mounts,
+        refs,
+        tree,
         errors,
         warnings: findings.len() - errors,
         findings,
+    }
+}
+
+/// Refs kept for a path no node charts: an error when the path is no directory here, a warning
+/// otherwise (chart the directory, or move the refs to the node that should carry them).
+fn check_refs_path(repo: &Repo, path: &NodePath, findings: &mut Vec<Finding>) {
+    let finding = if path.to_dir(repo.root()).is_dir() {
+        let message = format!("{REFS_FILE} cites pages for `{path}`, where no node is charted");
+        warning_at(path, message)
+    } else {
+        let message =
+            format!("{REFS_FILE} cites pages for `{path}`, which is not a directory here");
+        error_at(path, message)
     };
-    Ok(report)
+    findings.push(finding);
 }
 
 /// `path` says where the file sits.
@@ -154,12 +231,13 @@ fn check_fs_children(
         }
         let mount_above = repo.mount_holding(&child).filter(|mount| *mount != child);
         let child_dir = child.to_dir(repo.root());
-        let why_not = if Repo::is_unmigrated_dir(&child_dir) {
+        let left_behind = repo.era() == Era::Current && Repo::is_unmigrated_dir(&child_dir);
+        let why_not = if left_behind {
             format!(
                 "`{child}` holds a NODE.json from before v0.7 — run `nodes migrate` (in a mounted tree, from its root)"
             )
         } else if !repo.node_file(&child).is_file() {
-            format!("`{child}` has no NODE.inf.json")
+            format!("`{child}` has no {}", repo.era().node_file())
         } else if let Some(mount) = mount_above {
             format!("`{child}` belongs to the tree mounted at `{mount}`")
         } else {
@@ -181,10 +259,20 @@ fn check_mount(
     findings: &mut Vec<Finding>,
 ) -> Result<(), Error> {
     let mount_point = repo.location_of(mount_dir)?;
-    let root_file = mount_dir.join(NODE_FILE);
-    if let Err(unreadable) = repo.read(&root_file) {
-        let finding = error_at(&mount_point, unreadable.to_string());
-        findings.push(finding);
+    let mounted = repo.mounted_tree(&mount_point);
+    if Repo::holds_root_node(mount_dir) {
+        let root_file = mounted.node_file(&NodePath::root());
+        if let Err(unreadable) = mounted.read(&root_file) {
+            let finding = error_at(&mount_point, unreadable.to_string());
+            findings.push(finding);
+        }
+    } else if !Repo::is_checkout_top(mount_dir) {
+        // Refs alone are a tree of their own only in a checkout of their own — a fresh clone
+        // mounted here. Anywhere else they split this tree.
+        let message = format!(
+            "holds a {REFS_FILE} but no root node, so it splits this tree in two: move its refs into the {REFS_FILE} at the root"
+        );
+        findings.push(error_at(&mount_point, message));
     }
     check_listed_by_ancestor(tree, &mount_point, findings);
     Ok(())
@@ -210,7 +298,7 @@ fn check_listed_by_ancestor(tree: &NodeTree, location: &NodePath, findings: &mut
     let message = match listing {
         Some(entry) if entry.node => return,
         Some(_) => format!(
-            "listed in `{}`'s fs with node: false, but it has a NODE.inf.json",
+            "listed in `{}`'s fs with node: false, but it has a node of its own",
             ancestor.location
         ),
         None => format!("not listed in `{}`'s fs", ancestor.location),
@@ -218,13 +306,19 @@ fn check_listed_by_ancestor(tree: &NodeTree, location: &NodePath, findings: &mut
     findings.push(error_at(location, message));
 }
 
-/// Refs cite each page once, and — given an index — only pages it lists; a superseded entry warns.
-fn check_refs(node: &LoadedNode, index: Option<&RefIndex>, findings: &mut Vec<Finding>) {
+/// The refs of `path` cite each page once, and — given an index — only pages it lists; a
+/// superseded entry warns.
+fn check_refs(
+    path: &NodePath,
+    refs: &[Ref],
+    index: Option<&RefIndex>,
+    findings: &mut Vec<Finding>,
+) {
     let mut seen: Vec<PageId> = Vec::new();
-    for reference in &node.node.refs {
+    for reference in refs {
         if seen.contains(&reference.page) {
             let message = format!("page {} is cited more than once", reference.page);
-            findings.push(error(node, message));
+            findings.push(error_at(path, message));
         }
         seen.push(reference.page);
         let Some(index) = index else {
@@ -236,14 +330,14 @@ fn check_refs(node: &LoadedNode, index: Option<&RefIndex>, findings: &mut Vec<Fi
                     "ref {} ({}) is not in the ref index",
                     reference.page, reference.title
                 );
-                findings.push(error(node, message));
+                findings.push(error_at(path, message));
             }
             Some(entry) if entry.superseded => {
                 let message = format!(
                     "ref {} ({}) is marked superseded in the ref index",
                     reference.page, reference.title
                 );
-                findings.push(warning(node, message));
+                findings.push(warning_at(path, message));
             }
             Some(_) => {}
         }
@@ -262,10 +356,10 @@ fn error_at(path: &NodePath, message: String) -> Finding {
     }
 }
 
-fn warning(node: &LoadedNode, message: String) -> Finding {
+fn warning_at(path: &NodePath, message: String) -> Finding {
     Finding {
         severity: Severity::Warning,
-        path: node.location.clone(),
+        path: path.clone(),
         message,
     }
 }
