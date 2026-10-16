@@ -6,16 +6,51 @@
 //! checkout that holds no node tree at all, such as CI's.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::schema::{NodePath, Ref};
 
 /// Every node's refs, keyed by the node's path. A path that cites nothing has no entry; a tree that
 /// cites nothing has no file.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct TreeRefs(BTreeMap<NodePath, Vec<Ref>>);
+
+/// Hand-written for one rule a derived map lacks: a path listed twice is refused, never collapsed
+/// into its last entry. "Keep both sides" of a merge conflict leaves exactly that, and a silent
+/// collapse would drop refs while `check` passed.
+impl<'de> Deserialize<'de> for TreeRefs {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(TreeRefsVisitor)
+    }
+}
+
+struct TreeRefsVisitor;
+
+impl<'de> Visitor<'de> for TreeRefsVisitor {
+    type Value = TreeRefs;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("an object of node path → refs")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut entries: A) -> Result<TreeRefs, A::Error> {
+        let mut paths: BTreeMap<NodePath, Vec<Ref>> = BTreeMap::new();
+        while let Some((path, refs)) = entries.next_entry::<NodePath, Vec<Ref>>()? {
+            if paths.contains_key(&path) {
+                let listed_twice = de::Error::custom(format!(
+                    "`{path}` is listed more than once; merge its refs into one entry"
+                ));
+                return Err(listed_twice);
+            }
+            paths.insert(path, refs);
+        }
+        Ok(TreeRefs(paths))
+    }
+}
 
 impl TreeRefs {
     /// Parses a `NODE.refs.json`: an object of node path → refs, each ref `{page, title, governs}`
@@ -112,5 +147,16 @@ mod tests {
         assert!(TreeRefs::parse(unknown_key).is_err());
         let bad_path = r#"{"/abs": []}"#;
         assert!(TreeRefs::parse(bad_path).is_err());
+        let listed_twice = r#"{
+  "backend": [{"page": 1, "title": "One", "governs": "a"}],
+  "backend": [{"page": 2, "title": "Two", "governs": "b"}]
+}"#;
+        let listed_twice_error = TreeRefs::parse(listed_twice).expect_err("never collapsed");
+        assert!(
+            listed_twice_error
+                .to_string()
+                .contains("`backend` is listed more than once"),
+            "{listed_twice_error}"
+        );
     }
 }

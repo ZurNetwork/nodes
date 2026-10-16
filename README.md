@@ -43,7 +43,7 @@ Every `NODE.inf.json` has exactly these fields, in this order; unknown keys — 
 }
 ```
 
-Each key is a node's path; each ref is a page id, its title, and what it governs there. A path that cites nothing has no entry, and a tree that cites nothing has no file. `add-ref`, `rm-ref` and `set <path> refs` write it; `get`, `chain`, `find` and every `--json` node carry each node's refs, so a reader never opens it. `nodes refs <page>` and `nodes check` read it with no node tree present, and in such a checkout — a worktree, a fresh clone — `add-ref` and `rm-ref` edit it alone (for any directory there), so a ref change ships in the same commit as the code it describes. Leave its formatting to `nodes fmt`.
+Each key is a node's path; each ref is a page id, its title, and what it governs there. A path that cites nothing has no entry, and a tree that cites nothing has no file. `add-ref`, `rm-ref` and `set <path> refs` write it; `get`, `chain`, `find` and every `--json` node carry each node's refs, so a reader never opens it. `nodes refs <page>` and `nodes check` read it with no node tree present, and in such a checkout — a worktree, a fresh clone — `add-ref` and `rm-ref` edit it alone (for any directory there), so a ref change ships in the same commit as the code it describes. A refs file is only ever started at a checkout's top level (one holding `.git` or `.jj`): anywhere else it would start a tree of its own and split the one above, so a mistaken `--root` is refused. A path listed twice — what keeping both sides of a merge conflict leaves — is an error, never silently collapsed. Leave its formatting to `nodes fmt`.
 
 ## Type and tags
 
@@ -212,7 +212,8 @@ The walk that finds `NODE.inf.json` files judges directories only, so a `*.json`
 - every `fs` entry with `node: true` has a `NODE.inf.json` at that path (a nested name like `src/account/` is allowed, so a pass-through directory needs no node of its own) that the walk reaches — a node that is hidden, ignored or inside a mount is an error — and every node or mount directly beneath another node is listed there with `node: true`;
 - a mount's root node fits the schema; nothing else of a mounted tree is checked (see Mounts);
 - a node cites a page at most once;
-- `NODE.refs.json` cites pages only for directories that exist (an error otherwise) and that carry a node (a warning otherwise: chart the directory, or move the refs to the node that should carry them);
+- a `NODE.refs.json` beneath the root with no root node beside it, outside a checkout of its own, splits the tree: an error;
+- `NODE.refs.json` lists each path once, and cites pages only for directories that exist (an error otherwise) and that carry a node (a warning otherwise: chart the directory, or move the refs to the node that should carry them);
 - with `--ref-index <file>`: every cited page appears in that file (a line's first run of digits is its page id), and a page whose line carries the superseded marker (`SUPERSEDED` by default, `--superseded-marker` to change) warns.
 
 **With no node tree here** — only the committed `NODE.refs.json`, as in CI or a fresh clone — `check` checks the refs alone: every path a directory, no page twice per path, and the `--ref-index` rules. Its summary says so: `refs only (no node tree here): 12 refs, 0 errors, 0 warnings`. `--json` reports carry `refs` (how many were checked) and `tree` (whether a node tree was there).

@@ -340,12 +340,11 @@ fn run_in_tree(
     command: TreeCommand,
     output: Output,
 ) -> Result<ExitCode, Error> {
-    let (repo, start) = open_repo(root)?;
+    let repo = open_repo(root)?;
     if command.waits_for_migrate() && repo.is_unmigrated() {
-        let found_above = start.filter(|start| start != repo.root());
         let unmigrated = Error::Unmigrated {
             root: repo.root().to_path_buf(),
-            found_above,
+            found_above: repo.found_above().map(Path::to_path_buf),
         };
         return Err(unmigrated);
     }
@@ -396,16 +395,12 @@ fn given_or_current_dir(root: Option<PathBuf>) -> Result<PathBuf, Error> {
     canonical_dir(&dir)
 }
 
-/// The tree a command works on — `--root`, or the nearest one above the current directory — and
-/// where discovery started, when it did.
-fn open_repo(root: Option<PathBuf>) -> Result<(Repo, Option<PathBuf>), Error> {
+/// The tree a command works on: `--root`, or the nearest one above the current directory.
+fn open_repo(root: Option<PathBuf>) -> Result<Repo, Error> {
     let Some(root) = root else {
-        let cwd = current_dir()?;
-        let repo = Repo::discover(&cwd)?;
-        return Ok((repo, Some(cwd)));
+        return Repo::discover(&current_dir()?);
     };
-    let repo = Repo::at(canonical_dir(&root)?);
-    Ok((repo, None))
+    Ok(Repo::at(canonical_dir(&root)?))
 }
 
 /// Why a checkout holds no node here: `NoNodeTree` when it holds only the tree's refs (a fresh
@@ -1072,10 +1067,17 @@ fn rm_ref(repo: &Repo, input: &str, page: PageId, output: Output) -> Result<Exit
 /// In a checkout with no node tree — a worktree, a fresh clone — a ref edit goes to
 /// `NODE.refs.json` alone, so it ships in the same commit as the code it describes: the directory
 /// it is for, which must exist. `None` where a node tree is here, and the edit goes through the
-/// node as usual.
+/// node as usual. A refs file is created only at a checkout's top level: anywhere else it would
+/// start a tree of its own and split the one above (a mistaken `--root`).
 fn refs_alone_target(repo: &Repo, input: &str) -> Result<Option<NodePath>, Error> {
     if repo.node_file(&NodePath::root()).is_file() {
         return Ok(None);
+    }
+    if !repo.refs_file().is_file() && !Repo::is_checkout_top(repo.root()) {
+        let outside_tree = Error::RefsOutsideTree {
+            root: repo.root().to_path_buf(),
+        };
+        return Err(outside_tree);
     }
     let path = repo.node_path(input)?;
     refuse_inside_mount(repo, &path)?;
@@ -1362,6 +1364,8 @@ fn init(repo: &Repo, args: InitArgs, output: Output) -> Result<ExitCode, Error> 
         };
         return Err(unmigrated);
     }
+    // A directory holding a node of a tree above is refused before anything is written.
+    let holds_root_node = holds_root_node(repo)?;
     let mut visited = Vec::new();
     if !args.no_gitignore {
         visited.push(Formatted {
@@ -1370,7 +1374,16 @@ fn init(repo: &Repo, args: InitArgs, output: Output) -> Result<ExitCode, Error> 
         });
     }
     if let Some(node_type) = args.node_type {
-        let seeded = seed_root(repo, node_type, args.categories)?;
+        let seeded = if holds_root_node {
+            let file = repo.display(&repo.node_file(&NodePath::root()));
+            note(&format!("{file} is already there: left as it is"));
+            Formatted {
+                file,
+                changed: false,
+            }
+        } else {
+            seed_root(repo, node_type, args.categories)?
+        };
         visited.push(seeded);
     }
     let text: String = visited
@@ -1381,32 +1394,29 @@ fn init(repo: &Repo, args: InitArgs, output: Output) -> Result<ExitCode, Error> 
     output.emit(&visited, &text)
 }
 
-/// Writes the root node `init` seeds — `short` is the directory's name, `is` starts empty — unless
-/// a root node is already there. A directory holding a node of a tree above is refused: it is no
-/// root. Seeding beneath another tree makes a mount of it, and a note says so.
+/// Whether `init`'s directory already holds a root node. One that holds a node of a tree above
+/// is refused: it is no root.
+fn holds_root_node(repo: &Repo) -> Result<bool, Error> {
+    let file = repo.node_file(&NodePath::root());
+    if !file.is_file() {
+        return Ok(false);
+    }
+    let existing = repo.read(&file)?;
+    if !existing.node.path.is_root() {
+        let not_a_root = Error::NotARoot {
+            dir: repo.root().to_path_buf(),
+            path: existing.node.path,
+        };
+        return Err(not_a_root);
+    }
+    Ok(true)
+}
+
+/// Writes the root node `init` seeds — `short` is the directory's name, `is` starts empty.
+/// Seeding beneath another tree makes a mount of it, and a note says so.
 fn seed_root(repo: &Repo, node_type: NodeType, categories: Vec<Tag>) -> Result<Formatted, Error> {
     let file = repo.node_file(&NodePath::root());
     let name = repo.display(&file);
-    if file.is_file() {
-        let text = std::fs::read_to_string(&file).map_err(|source| Error::io(&file, source))?;
-        let existing = Node::parse(&text).map_err(|source| Error::Schema {
-            file: file.clone(),
-            source,
-        })?;
-        if !existing.path.is_root() {
-            let not_a_root = Error::NotARoot {
-                dir: repo.root().to_path_buf(),
-                path: existing.path,
-            };
-            return Err(not_a_root);
-        }
-        note(&format!("{name} is already there: left as it is"));
-        let left_alone = Formatted {
-            file: name,
-            changed: false,
-        };
-        return Ok(left_alone);
-    }
     let words: Vec<&str> = categories.iter().map(Tag::word).collect();
     let input = words.join(" ");
     let tags = Tags::try_from(categories).map_err(|reason| Error::InvalidArgument {

@@ -57,6 +57,8 @@ impl Era {
 pub struct Repo {
     root: PathBuf,
     era: Era,
+    /// Where discovery started, when the tree was found above it.
+    found_above: Option<PathBuf>,
 }
 
 /// A node read from disk. `location` is where the file sits — the truth `check` holds `path` against.
@@ -224,26 +226,51 @@ impl Repo {
     /// The tree rooted at `root`, in whichever era its root says.
     pub fn at(root: PathBuf) -> Self {
         let era = Era::of(&root);
-        Self { root, era }
+        Self {
+            root,
+            era,
+            found_above: None,
+        }
     }
 
     /// Walks up from `start` to the nearest directory that roots a tree (see
     /// [`Repo::holds_root`]). A root from before v0.7 (a `NODE.json`) is found too: it is read as
     /// it is, and `migrate` brings it up to date.
     pub fn discover(start: &Path) -> Result<Self, Error> {
-        start
+        let root = start
             .ancestors()
             .find(|dir| Self::holds_root(dir))
-            .map(|dir| Self::at(dir.to_path_buf()))
             .ok_or_else(|| Error::NoRoot {
                 start: start.to_path_buf(),
-            })
+            })?;
+        let found_above = (root != start).then(|| start.to_path_buf());
+        let repo = Self {
+            found_above,
+            ..Self::at(root.to_path_buf())
+        };
+        Ok(repo)
+    }
+
+    /// Where discovery started, when the tree was found above it.
+    pub fn found_above(&self) -> Option<&Path> {
+        self.found_above.as_deref()
+    }
+
+    /// Whether `dir` is a checkout's top level: it holds `.git` (a directory, or a worktree's
+    /// file) or `.jj`.
+    pub fn is_checkout_top(dir: &Path) -> bool {
+        dir.join(".git").exists() || dir.join(".jj").exists()
     }
 
     /// Whether `dir` roots a tree: it holds a node file of either era declaring `path: "."`, or
     /// the tree's `NODE.refs.json` — all a checkout with no node tree has. Only `path` is read, so
     /// a root that does not fit the schema is still a root — and is reported as one.
     fn holds_root(dir: &Path) -> bool {
+        dir.join(REFS_FILE).is_file() || Self::holds_root_node(dir)
+    }
+
+    /// Whether `dir` holds a root node: a node file of either era declaring `path: "."`.
+    pub fn holds_root_node(dir: &Path) -> bool {
         let declares_root = |node_file: &str| {
             let Ok(text) = fs::read_to_string(dir.join(node_file)) else {
                 return false;
@@ -251,7 +278,7 @@ impl Repo {
             serde_json::from_str::<DeclaredPath>(&text)
                 .is_ok_and(|declared| declared.path.is_root())
         };
-        dir.join(REFS_FILE).is_file() || declares_root(NODE_FILE) || declares_root(LEGACY_NODE_FILE)
+        declares_root(NODE_FILE) || declares_root(LEGACY_NODE_FILE)
     }
 
     pub fn era(&self) -> Era {
@@ -515,9 +542,15 @@ impl Repo {
             }),
             Era::Legacy => Node::parse_migrating(&text).map(|migrating| migrating.node),
         };
-        let node = parsed.map_err(|source| Error::Schema {
-            file: file.to_path_buf(),
-            source,
+        let node = parsed.map_err(|source| {
+            // A file an older release wrote — `refs` inside, ranked `categories` — is `migrate`'s.
+            let older_release = Node::parse_migrating(&text).is_ok();
+            let file = file.to_path_buf();
+            if older_release {
+                Error::NeedsMigrating { file, source }
+            } else {
+                Error::Schema { file, source }
+            }
         })?;
         let loaded = LoadedNode {
             file: file.to_path_buf(),
@@ -531,8 +564,18 @@ impl Repo {
     /// Says on stderr that this tree is from before v0.7 — read as it is — when it is.
     pub fn note_if_unmigrated(&self) {
         if self.is_unmigrated() {
+            let found_above = self
+                .found_above
+                .as_ref()
+                .map(|start| {
+                    format!(
+                        " (found above {}; to read another tree, pass --root)",
+                        start.display()
+                    )
+                })
+                .unwrap_or_default();
             note(&format!(
-                "{}: a tree from before v0.7 (NODE.json files), read as it is; run `nodes migrate` there before any write",
+                "{}: a tree from before v0.7 (NODE.json files), read as it is{found_above}; run `nodes migrate` there before any write",
                 self.root.display()
             ));
         }
@@ -639,7 +682,7 @@ impl Repo {
         if self.is_unmigrated() {
             let unmigrated = Error::Unmigrated {
                 root: self.root.clone(),
-                found_above: None,
+                found_above: self.found_above.clone(),
             };
             return Err(unmigrated);
         }

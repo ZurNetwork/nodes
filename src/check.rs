@@ -260,13 +260,19 @@ fn check_mount(
 ) -> Result<(), Error> {
     let mount_point = repo.location_of(mount_dir)?;
     let mounted = repo.mounted_tree(&mount_point);
-    // A mount that holds only its refs — a fresh clone mounted here — has no root node to read.
-    let root_file = mounted.node_file(&NodePath::root());
-    if root_file.is_file()
-        && let Err(unreadable) = mounted.read(&root_file)
-    {
-        let finding = error_at(&mount_point, unreadable.to_string());
-        findings.push(finding);
+    if Repo::holds_root_node(mount_dir) {
+        let root_file = mounted.node_file(&NodePath::root());
+        if let Err(unreadable) = mounted.read(&root_file) {
+            let finding = error_at(&mount_point, unreadable.to_string());
+            findings.push(finding);
+        }
+    } else if !Repo::is_checkout_top(mount_dir) {
+        // Refs alone are a tree of their own only in a checkout of their own — a fresh clone
+        // mounted here. Anywhere else they split this tree.
+        let message = format!(
+            "holds a {REFS_FILE} but no root node, so it splits this tree in two: move its refs into the {REFS_FILE} at the root"
+        );
+        findings.push(error_at(&mount_point, message));
     }
     check_listed_by_ancestor(tree, &mount_point, findings);
     Ok(())

@@ -36,6 +36,15 @@ pub enum Error {
         file: PathBuf,
         source: serde_json::Error,
     },
+    /// A node file an older release wrote — `refs` inside, ranked `categories` — that only
+    /// `migrate` brings up to date.
+    NeedsMigrating {
+        file: PathBuf,
+        source: serde_json::Error,
+    },
+    /// A ref edit with no node tree and no `NODE.refs.json` here, in a directory that is no
+    /// checkout's top level: a refs file there would start a tree of its own.
+    RefsOutsideTree { root: PathBuf },
     /// No node is charted at this path.
     UnknownNode(NodePath),
     /// A typed path could not be turned into a node path.
@@ -123,6 +132,16 @@ impl fmt::Display for Error {
             ),
             Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
             Self::Schema { file, source } => write!(f, "{}: {source}", file.display()),
+            Self::NeedsMigrating { file, source } => write!(
+                f,
+                "{}: {source} — an older release wrote it; `nodes migrate` brings it up to date (refs move into NODE.refs.json)",
+                file.display()
+            ),
+            Self::RefsOutsideTree { root } => write!(
+                f,
+                "{} holds no tree and is no checkout's top level, so a NODE.refs.json here would start a tree of its own; pass --root <the checkout's top level>",
+                root.display()
+            ),
             Self::UnknownNode(path) => write!(f, "no node charted at `{path}`"),
             Self::InvalidPath { input, reason } => write!(f, "`{input}`: {reason}"),
             Self::InvalidArgument {
@@ -162,7 +181,9 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
-            Self::Schema { source, .. } | Self::InvalidValue { source, .. } => Some(source),
+            Self::Schema { source, .. }
+            | Self::NeedsMigrating { source, .. }
+            | Self::InvalidValue { source, .. } => Some(source),
             Self::IgnoreRules { source, .. } => Some(source),
             _ => None,
         }

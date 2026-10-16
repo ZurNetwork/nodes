@@ -1551,6 +1551,71 @@ fn a_checkout_with_refs_and_no_node_tree_checks_and_answers_its_refs() {
 }
 
 #[test]
+fn a_refs_file_never_splits_a_tree() {
+    let repo = TempRepo::charted();
+    for dir in [".", "backend", "backend/crates", "frontend"] {
+        fs::remove_file(repo.root.join(dir).join("NODE.inf.json")).expect("removed");
+    }
+    let wrong_root = repo.root.join("backend").display().to_string();
+    let mistaken = Command::new(env!("CARGO_BIN_EXE_nodes"))
+        .args(["--root", &wrong_root, "add-ref", "crates", "5", "Five", "x"])
+        .output()
+        .expect("runs");
+    assert!(
+        !mistaken.status.success(),
+        "a mistaken --root starts no tree"
+    );
+    assert!(
+        String::from_utf8_lossy(&mistaken.stderr).contains("would start a tree of its own"),
+        "{}",
+        String::from_utf8_lossy(&mistaken.stderr)
+    );
+    assert!(!repo.root.join("backend/NODE.refs.json").exists());
+    fs::create_dir_all(repo.root.join("checkout/.git")).expect("a checkout's top level");
+    let at_top = repo.root.join("checkout").display().to_string();
+    let started = Command::new(env!("CARGO_BIN_EXE_nodes"))
+        .args(["--root", &at_top, "add-ref", ".", "5", "Five", "x"])
+        .output()
+        .expect("runs");
+    assert!(
+        started.status.success(),
+        "a checkout's top level may start its refs"
+    );
+    let charted = TempRepo::charted();
+    charted.cite("frontend", "src", &[(1, "One", "x")]);
+    fs::create_dir_all(charted.root.join("frontend/src")).expect("dir");
+    let (stdout, _) = charted.fails(&["check"]);
+    assert!(
+        stdout.contains("error: frontend: holds a NODE.refs.json but no root node, so it splits this tree in two"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn an_old_file_and_an_old_tree_point_at_migrate() {
+    let repo = TempRepo::charted();
+    let with_refs = repo
+        .read("frontend/NODE.inf.json")
+        .replace("  \"notes\": []", "  \"refs\": [],\n  \"notes\": []");
+    repo.write("frontend/NODE.inf.json", &with_refs);
+    let (_, stderr) = repo.fails(&["get", "frontend"]);
+    assert!(
+        stderr.contains("unknown field `refs`")
+            && stderr.contains("`nodes migrate` brings it up to date"),
+        "{stderr}"
+    );
+    let older = TempRepo::charted();
+    older.unmigrate(".", &[".", "backend", "backend/crates", "frontend"]);
+    let below = older.nodes_in("backend", &["ls"]);
+    assert!(below.status.success());
+    assert!(
+        String::from_utf8_lossy(&below.stderr).contains("found above"),
+        "{}",
+        String::from_utf8_lossy(&below.stderr)
+    );
+}
+
+#[test]
 fn refs_live_in_one_file_and_writes_keep_it_canonical() {
     let repo = TempRepo::charted();
     let node_file = repo.read("frontend/NODE.inf.json");
@@ -1693,24 +1758,27 @@ fn init_ignores_the_node_files_then_seeds_a_root_node() {
 #[test]
 fn init_starts_where_it_is_told_and_refuses_what_is_no_root() {
     let repo = TempRepo::charted();
-    let below = Command::new(env!("CARGO_BIN_EXE_nodes"))
-        .current_dir(repo.root.join("backend"))
-        .args(["init"])
-        .output()
-        .expect("runs");
+    let below = repo.nodes_in("docs", &["init"]);
     assert!(below.status.success());
     assert!(
-        repo.root.join("backend/.gitignore").is_file(),
+        repo.root.join("docs/.gitignore").is_file(),
         "init never walks up to an ancestor's tree"
     );
-    let in_a_node = repo.nodes_in("backend", &["init", "code", "project"]);
-    assert!(!in_a_node.status.success());
-    assert!(
-        String::from_utf8_lossy(&in_a_node.stderr)
-            .contains("holds the node `backend` of a tree above it"),
-        "{}",
-        String::from_utf8_lossy(&in_a_node.stderr)
-    );
+    fs::remove_file(repo.root.join("docs/.gitignore")).expect("removed");
+    for args in [vec!["init"], vec!["init", "code", "project"]] {
+        let in_a_node = repo.nodes_in("backend", &args);
+        assert!(!in_a_node.status.success());
+        assert!(
+            String::from_utf8_lossy(&in_a_node.stderr)
+                .contains("holds the node `backend` of a tree above it"),
+            "{}",
+            String::from_utf8_lossy(&in_a_node.stderr)
+        );
+        assert!(
+            !repo.root.join("backend/.gitignore").exists(),
+            "refused before anything is written"
+        );
+    }
     let mounted = repo.nodes_in("docs", &["init", "--no-gitignore", "document", "docs"]);
     assert!(mounted.status.success());
     assert!(
