@@ -1,9 +1,10 @@
 //! A tree's refs: one committed `NODE.refs.json` at its root, every node's citations in it.
 //!
-//! Most of a node is derived from the directory it charts, so its file can stay out of version
-//! control and be re-charted. Its refs are authored — which design page governs what — so they live
-//! here instead: versioned, reviewed with the code, and checkable (`nodes check --ref-index`) in a
-//! checkout that holds no node tree at all, such as CI's.
+//! Most of a node is derived from the directory it charts, so a local-only tree can keep its files
+//! out of version control and re-chart them. Its refs are authored — which design page governs
+//! what — so they live here, committed whatever the tree does with its node files: versioned,
+//! reviewed with the code, and checkable (`nodes check --ref-index`) in a checkout that holds no
+//! node tree at all, such as a local-only tree's CI.
 
 use std::collections::BTreeMap;
 use std::fmt;

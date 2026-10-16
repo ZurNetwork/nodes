@@ -36,8 +36,8 @@ pub struct Report {
     pub mounts: usize,
     /// The refs checked, wherever the tree keeps them.
     pub refs: usize,
-    /// Whether a node tree was here. Without one — a fresh clone, CI — only the tree's
-    /// `NODE.refs.json` was checked.
+    /// Whether a node tree was here. Without one — a local-only tree's fresh clone, CI — only
+    /// the tree's `NODE.refs.json` was checked.
     pub tree: bool,
     pub errors: usize,
     pub warnings: usize,
@@ -70,8 +70,8 @@ impl std::fmt::Display for Severity {
 
 /// Runs every rule over the repository's own nodes. A mounted tree is another tree's business:
 /// only its root node is read, and its refs are never held against this tree's index. A checkout
-/// that holds the tree's `NODE.refs.json` but no nodes — node files are never committed — gets its
-/// refs checked alone.
+/// that holds the tree's `NODE.refs.json` but no nodes — a local-only tree's node files are not
+/// committed — gets its refs checked alone.
 pub fn check(repo: &Repo, options: &CheckOptions) -> Result<Report, Error> {
     repo.note_if_unmigrated();
     let ref_index = options

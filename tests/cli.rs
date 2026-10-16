@@ -1,5 +1,6 @@
 //! End-to-end tests: the `nodes` binary over a throwaway charted repository.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -1169,6 +1170,26 @@ fn classify_sets_the_type_and_the_categories_even_where_they_are_missing() {
     );
 }
 
+/// Every file beneath `dir`, by its path relative to `dir`, with its bytes: what a run that
+/// writes nothing leaves exactly as it was.
+fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        for entry in fs::read_dir(&current).expect("a readable dir") {
+            let path = entry.expect("a dir entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let relative = path.strip_prefix(dir).expect("beneath dir").to_path_buf();
+                let bytes = fs::read(&path).expect("a readable file");
+                files.insert(relative, bytes);
+            }
+        }
+    }
+    files
+}
+
 /// The entry a `--json` `fmt`, `init` or `migrate` run gives for `file`.
 fn visit_of<'a>(visited: &'a Value, file: &str) -> &'a Value {
     visited
@@ -1195,7 +1216,7 @@ fn migrate_rewrites_ranked_categories_into_category_tags_once() {
         );
     }
     assert_eq!(
-        repo.ok(&["migrate"]),
+        repo.ok(&["migrate", "--gitignore"]),
         "migrate: .gitignore\nmigrate: frontend/NODE.inf.json\n"
     );
     assert_eq!(
@@ -1203,10 +1224,15 @@ fn migrate_rewrites_ranked_categories_into_category_tags_once() {
         "category:ui\ncategory:source\n",
         "the ranking carries over"
     );
-    assert_eq!(repo.ok(&["migrate"]), "", "a second run changes nothing");
+    assert_eq!(
+        repo.ok(&["migrate", "--gitignore"]),
+        "",
+        "a second run changes nothing"
+    );
     assert_eq!(repo.ok(&["fmt"]), "", "migrate leaves canonical files");
     assert_eq!(repo.ok(&["check"]), "4 nodes, 0 errors, 0 warnings\n");
-    let visited: Value = serde_json::from_str(&repo.ok(&["--json", "migrate"])).expect("json");
+    let visited: Value =
+        serde_json::from_str(&repo.ok(&["--json", "migrate", "--gitignore"])).expect("json");
     let gitignore_visit = json!({"file": ".gitignore", "changed": false});
     let frontend_visit = json!({"file": "frontend/NODE.inf.json", "changed": false});
     assert_eq!(visited[0], gitignore_visit);
@@ -1242,7 +1268,7 @@ fn migrate_moves_every_node_json_into_a_node_inf_json_and_their_refs_into_one_fi
         "",
     ]
     .join("\n");
-    assert_eq!(repo.ok(&["migrate"]), expected_report);
+    assert_eq!(repo.ok(&["migrate", "--gitignore"]), expected_report);
     assert_eq!(
         repo.read(".gitignore"),
         "/target\n**/*.inf.json\n",
@@ -1260,7 +1286,11 @@ fn migrate_moves_every_node_json_into_a_node_inf_json_and_their_refs_into_one_fi
         "every node's refs, in the one committed file"
     );
     assert_eq!(repo.ok(&["check"]), "4 nodes, 0 errors, 0 warnings\n");
-    assert_eq!(repo.ok(&["migrate"]), "", "a second run changes nothing");
+    assert_eq!(
+        repo.ok(&["migrate", "--gitignore"]),
+        "",
+        "a second run changes nothing"
+    );
     assert_eq!(
         repo.read(".gitignore"),
         "/target\n**/*.inf.json\n",
@@ -1286,19 +1316,24 @@ fn migrate_reports_a_rename_in_json() {
 }
 
 #[test]
-fn migrate_takes_no_gitignore_and_no_tree() {
+fn migrate_refuses_a_directory_that_holds_no_tree_before_writing_a_gitignore() {
     let repo = TempRepo::charted();
     repo.unmigrate(".", &["."]);
     let report = repo.ok(&["migrate", "--no-gitignore"]);
     assert!(!report.contains(".gitignore"), "{report}");
     assert!(!repo.root.join(".gitignore").exists(), "left alone");
     let empty = TempRepo::new();
-    let (_, stderr) = empty.fails(&["migrate"]);
-    assert!(
-        stderr.contains("holds no tree: nothing to migrate"),
-        "{stderr}"
-    );
-    assert!(!empty.root.join(".gitignore").exists());
+    for args in [vec!["migrate"], vec!["migrate", "--gitignore"]] {
+        let (_, stderr) = empty.fails(&args);
+        assert!(
+            stderr.contains("holds no tree: nothing to migrate"),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            snapshot(&empty.root).is_empty(),
+            "{args:?}: nothing is written"
+        );
+    }
 }
 
 #[test]
@@ -1306,7 +1341,7 @@ fn migrate_drops_a_duplicate_and_refuses_two_files_that_differ() {
     let repo = TempRepo::charted();
     repo.unmigrate(".", &["frontend"]);
     let legacy = repo.read("frontend/NODE.json");
-    repo.ok(&["migrate"]);
+    repo.ok(&["migrate", "--gitignore"]);
     repo.write("frontend/NODE.json", &legacy);
     assert_eq!(
         repo.ok(&["migrate"]),
@@ -1317,7 +1352,7 @@ fn migrate_drops_a_duplicate_and_refuses_two_files_that_differ() {
     let differing = legacy.replace("The client tier.", "Something else.");
     repo.write("frontend/NODE.json", &differing);
     fs::remove_file(repo.root.join(".gitignore")).expect("removed");
-    let (_, stderr) = repo.fails(&["migrate"]);
+    let (_, stderr) = repo.fails(&["migrate", "--gitignore"]);
     assert!(
         stderr.contains("holds both NODE.json and NODE.inf.json, and they differ"),
         "{stderr}"
@@ -1355,10 +1390,15 @@ fn migrate_completes_a_run_cut_short() {
         repo.root.join("frontend/NODE.inf.json"),
     )
     .expect("renamed");
-    assert_eq!(
-        repo.ok(&["migrate"]),
-        "migrate: .gitignore\nmigrate: NODE.refs.json\nmigrate: NODE.json → NODE.inf.json\nmigrate: frontend/NODE.inf.json\n"
-    );
+    let expected_report = [
+        "migrate: .gitignore",
+        "migrate: NODE.refs.json",
+        "migrate: NODE.json → NODE.inf.json",
+        "migrate: frontend/NODE.inf.json",
+        "",
+    ]
+    .join("\n");
+    assert_eq!(repo.ok(&["migrate", "--gitignore"]), expected_report);
     assert_eq!(
         repo.ok(&["get", "frontend", "refs"]),
         "39944194  Frontend Stack — SvelteKit\n",
@@ -1383,7 +1423,7 @@ fn migrate_leaves_a_mounted_tree_to_its_own_root() {
         repo.ok(&["check"]),
         "1 nodes, 2 mounts, 0 errors, 0 warnings\n"
     );
-    let outer = repo.nodes(&["migrate"]);
+    let outer = repo.nodes(&["migrate", "--gitignore"]);
     assert!(outer.status.success());
     assert_eq!(
         String::from_utf8_lossy(&outer.stdout),
@@ -1401,7 +1441,7 @@ fn migrate_leaves_a_mounted_tree_to_its_own_root() {
     let from_its_own_root = Command::new(env!("CARGO_BIN_EXE_nodes"))
         .arg("--root")
         .arg(&life_root)
-        .arg("migrate")
+        .args(["migrate", "--gitignore"])
         .output()
         .expect("runs");
     assert!(from_its_own_root.status.success());
@@ -1665,7 +1705,7 @@ fn refs_live_in_one_file_and_writes_keep_it_canonical() {
 fn the_gitignore_line_respects_what_is_already_there() {
     let crlf = TempRepo::new();
     crlf.write(".gitignore", "dist/\r\nbuild/");
-    crlf.ok(&["init"]);
+    crlf.ok(&["init", "--gitignore"]);
     assert_eq!(
         crlf.read(".gitignore"),
         "dist/\r\nbuild/\r\n**/*.inf.json\r\n"
@@ -1673,13 +1713,13 @@ fn the_gitignore_line_respects_what_is_already_there() {
     let equivalent = TempRepo::new();
     equivalent.write(".gitignore", "*.inf.json\n");
     assert_eq!(
-        equivalent.ok(&["init"]),
+        equivalent.ok(&["init", "--gitignore"]),
         "",
         "already ignored, however spelled"
     );
     let negated = TempRepo::new();
     negated.write(".gitignore", "**/*.inf.json\n!**/*.inf.json\n");
-    let run = negated.nodes(&["init"]);
+    let run = negated.nodes(&["init", "--gitignore"]);
     assert!(run.status.success());
     assert!(String::from_utf8_lossy(&run.stderr).contains("re-includes node files"));
     assert_eq!(
@@ -1701,7 +1741,7 @@ fn no_write_follows_a_symlink() {
     let elsewhere = TempRepo::new();
     std::os::unix::fs::symlink(elsewhere.root.join("target"), repo.root.join(".gitignore"))
         .expect("a dangling link");
-    let (_, stderr) = repo.fails(&["init"]);
+    let (_, stderr) = repo.fails(&["init", "--gitignore"]);
     assert!(stderr.contains("is a symbolic link"), "{stderr}");
     assert!(
         !elsewhere.root.join("target").exists(),
@@ -1710,9 +1750,9 @@ fn no_write_follows_a_symlink() {
 }
 
 #[test]
-fn init_ignores_the_node_files_then_seeds_a_root_node() {
+fn init_with_gitignore_ignores_the_node_files_then_seeds_a_root_node() {
     let repo = TempRepo::new();
-    assert_eq!(repo.ok(&["init"]), "init: .gitignore\n");
+    assert_eq!(repo.ok(&["init", "--gitignore"]), "init: .gitignore\n");
     assert_eq!(repo.read(".gitignore"), "**/*.inf.json\n");
     assert!(
         !repo.root.join("NODE.inf.json").exists(),
@@ -1724,7 +1764,7 @@ fn init_ignores_the_node_files_then_seeds_a_root_node() {
         "a type needs its categories: {stderr}"
     );
     assert_eq!(
-        repo.ok(&["init", "code", "project", "tooling"]),
+        repo.ok(&["init", "--gitignore", "code", "project", "tooling"]),
         "init: NODE.inf.json\n",
         "the .gitignore line is already there"
     );
@@ -1750,7 +1790,8 @@ fn init_ignores_the_node_files_then_seeds_a_root_node() {
         after_set,
         "an existing node is never overwritten"
     );
-    let visited: Value = serde_json::from_str(&repo.ok(&["--json", "init"])).expect("json");
+    let visited: Value =
+        serde_json::from_str(&repo.ok(&["--json", "init", "--gitignore"])).expect("json");
     let gitignore_visit = json!([{"file": ".gitignore", "changed": false}]);
     assert_eq!(visited, gitignore_visit);
 }
@@ -1758,14 +1799,17 @@ fn init_ignores_the_node_files_then_seeds_a_root_node() {
 #[test]
 fn init_starts_where_it_is_told_and_refuses_what_is_no_root() {
     let repo = TempRepo::charted();
-    let below = repo.nodes_in("docs", &["init"]);
+    let below = repo.nodes_in("docs", &["init", "--gitignore"]);
     assert!(below.status.success());
     assert!(
         repo.root.join("docs/.gitignore").is_file(),
         "init never walks up to an ancestor's tree"
     );
     fs::remove_file(repo.root.join("docs/.gitignore")).expect("removed");
-    for args in [vec!["init"], vec!["init", "code", "project"]] {
+    for args in [
+        vec!["init", "--gitignore"],
+        vec!["init", "--gitignore", "code", "project"],
+    ] {
         let in_a_node = repo.nodes_in("backend", &args);
         assert!(!in_a_node.status.success());
         assert!(
@@ -1793,8 +1837,154 @@ fn init_starts_where_it_is_told_and_refuses_what_is_no_root() {
         "{stderr}"
     );
     repo.unmigrate(".", &["."]);
-    let (_, stderr) = repo.fails(&["init"]);
+    let (_, stderr) = repo.fails(&["init", "--gitignore"]);
     assert!(stderr.contains("nodes migrate"), "{stderr}");
+    assert!(
+        !repo.root.join(".gitignore").exists(),
+        "an unmigrated root is refused before anything is written"
+    );
+}
+
+#[test]
+fn init_leaves_gitignore_alone_by_default() {
+    let absent = TempRepo::new();
+    assert_eq!(
+        absent.ok(&["init", "code", "project"]),
+        "init: NODE.inf.json\n"
+    );
+    assert!(
+        !absent.root.join(".gitignore").exists(),
+        "a committed tree needs no .gitignore"
+    );
+    let existing = TempRepo::new();
+    existing.write(".gitignore", "dist/");
+    assert_eq!(
+        existing.ok(&["init", "code", "project"]),
+        "init: NODE.inf.json\n"
+    );
+    assert_eq!(existing.read(".gitignore"), "dist/", "byte-identical");
+    let in_json = TempRepo::new();
+    let visited: Value =
+        serde_json::from_str(&in_json.ok(&["--json", "init", "code", "project"])).expect("json");
+    let seeded_only = json!([{"file": "NODE.inf.json", "changed": true}]);
+    assert_eq!(visited, seeded_only);
+}
+
+#[test]
+fn migrate_leaves_gitignore_alone_by_default() {
+    let absent = TempRepo::charted();
+    let current_refs = absent.read("NODE.refs.json");
+    absent.unmigrate(".", &[".", "backend", "backend/crates", "frontend"]);
+    let expected_report = [
+        "migrate: NODE.refs.json",
+        "migrate: NODE.json → NODE.inf.json",
+        "migrate: backend/NODE.json → backend/NODE.inf.json",
+        "migrate: backend/crates/NODE.json → backend/crates/NODE.inf.json",
+        "migrate: frontend/NODE.json → frontend/NODE.inf.json",
+        "",
+    ]
+    .join("\n");
+    assert_eq!(absent.ok(&["migrate"]), expected_report);
+    assert!(
+        !absent.root.join(".gitignore").exists(),
+        "a committed tree needs no .gitignore"
+    );
+    assert!(!absent.root.join("frontend/NODE.json").exists());
+    assert_eq!(
+        absent.read("NODE.refs.json"),
+        current_refs,
+        "every node's refs, in the one committed file"
+    );
+    assert_eq!(absent.ok(&["check"]), "4 nodes, 0 errors, 0 warnings\n");
+    let existing = TempRepo::charted();
+    existing.unmigrate(".", &[".", "frontend"]);
+    existing.write(".gitignore", "dist/");
+    let visited: Value = serde_json::from_str(&existing.ok(&["--json", "migrate"])).expect("json");
+    assert_eq!(existing.read(".gitignore"), "dist/", "byte-identical");
+    let reports_gitignore = visited
+        .as_array()
+        .expect("a list of visits")
+        .iter()
+        .any(|entry| entry["file"] == ".gitignore");
+    assert!(!reports_gitignore, "{visited}");
+    assert!(!existing.root.join("frontend/NODE.json").exists());
+}
+
+#[test]
+fn gitignore_adds_the_line_first_on_init_and_on_migrate() {
+    let initialized = TempRepo::new();
+    initialized.write(".gitignore", "dist/");
+    assert_eq!(
+        initialized.ok(&["init", "--gitignore", "code", "project"]),
+        "init: .gitignore\ninit: NODE.inf.json\n"
+    );
+    assert_eq!(initialized.read(".gitignore"), "dist/\n**/*.inf.json\n");
+    let migrated = TempRepo::charted();
+    migrated.unmigrate(".", &[".", "frontend"]);
+    let visited: Value =
+        serde_json::from_str(&migrated.ok(&["--json", "migrate", "--gitignore"])).expect("json");
+    let gitignore_visit = json!({"file": ".gitignore", "changed": true});
+    assert_eq!(visited[0], gitignore_visit, "{visited}");
+    assert_eq!(migrated.read(".gitignore"), "**/*.inf.json\n");
+}
+
+#[test]
+fn no_gitignore_is_a_no_op_on_init_and_on_migrate() {
+    let initialized = TempRepo::new();
+    for dir in ["plain/tree", "flagged/tree"] {
+        fs::create_dir_all(initialized.root.join(dir)).expect("dir");
+    }
+    let plain = initialized.nodes_in("plain/tree", &["init", "code", "project"]);
+    let flagged = initialized.nodes_in(
+        "flagged/tree",
+        &["init", "--no-gitignore", "code", "project"],
+    );
+    assert!(plain.status.success() && flagged.status.success());
+    assert_eq!(plain.stdout, flagged.stdout);
+    assert_eq!(
+        snapshot(&initialized.root.join("plain")),
+        snapshot(&initialized.root.join("flagged")),
+        "the same files, byte for byte"
+    );
+    let plain = TempRepo::charted();
+    let flagged = TempRepo::charted();
+    for repo in [&plain, &flagged] {
+        repo.unmigrate(".", &[".", "backend", "frontend"]);
+    }
+    assert_eq!(
+        plain.ok(&["migrate"]),
+        flagged.ok(&["migrate", "--no-gitignore"])
+    );
+    assert_eq!(snapshot(&plain.root), snapshot(&flagged.root));
+}
+
+#[test]
+fn gitignore_and_no_gitignore_together_are_a_usage_error() {
+    let initialized = TempRepo::new();
+    let both = ["init", "--gitignore", "--no-gitignore", "code", "project"];
+    let refused = initialized.nodes(&both);
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(snapshot(&initialized.root).is_empty(), "nothing is written");
+    let migrated = TempRepo::charted();
+    migrated.unmigrate(".", &[".", "frontend"]);
+    let before = snapshot(&migrated.root);
+    let refused = migrated.nodes(&["migrate", "--gitignore", "--no-gitignore"]);
+    assert_eq!(refused.status.code(), Some(2));
+    assert_eq!(snapshot(&migrated.root), before, "nothing is written");
+}
+
+#[test]
+fn a_bare_init_writes_nothing_and_says_so() {
+    let repo = TempRepo::new();
+    repo.write(".gitignore", "dist/");
+    let before = snapshot(&repo.root);
+    let bare = repo.nodes(&["init"]);
+    assert_eq!(bare.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&bare.stdout), "");
+    let nothing_to_do_note = "nodes: nothing to do: give a type and categories to seed a root node, or --gitignore to keep the node files out of git\n";
+    assert_eq!(String::from_utf8_lossy(&bare.stderr), nothing_to_do_note);
+    assert_eq!(repo.ok(&["--json", "init"]), "[]\n");
+    assert_eq!(snapshot(&repo.root), before, "nothing is written");
 }
 
 #[test]
